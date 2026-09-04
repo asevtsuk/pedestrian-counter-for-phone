@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Pedestrian Counter</title>
+<style>
+  :root{
+    --bg:#0E1418;
+    --panel:#18222A;
+    --panel2:#111A20;
+    --rule:#2B3841;
+    --ink:#E6EDF2;
+    --muted:#8095A3;
+    --gate:#35D6C0;
+    --zone:#F5A524;
+    --dirA:#6FB6FF;
+    --dirB:#FF7D5C;
+    --stop:#FF5A52;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    font-variant-numeric:tabular-nums;overscroll-behavior:none}
+  body{padding-bottom:env(safe-area-inset-bottom)}
+
+  #stage{position:relative;width:100%;background:#000;line-height:0}
+  #vid{width:100%;height:auto;display:block}
+  #overlay{position:absolute;left:0;top:0;width:100%;height:100%;touch-action:none}
+
+  #startCard{position:absolute;inset:0;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:14px;background:#000;line-height:1.4;padding:24px;text-align:center}
+  #startCard p{margin:0;color:var(--muted);font-size:14px;max-width:34ch}
+
+  .float{position:absolute;left:10px;right:10px;bottom:10px;display:flex;gap:6px;line-height:1}
+  .float button{flex:1}
+
+  button{background:var(--panel);color:var(--ink);border:1px solid var(--rule);
+    border-radius:9px;padding:11px 12px;font-size:14px;font-weight:600;
+    font-family:inherit;cursor:pointer}
+  button:active{background:#22303a}
+  button.on{background:var(--ink);color:#0E1418;border-color:var(--ink)}
+  button.go{background:var(--gate);color:#05201c;border-color:var(--gate)}
+  button.stop{background:var(--stop);color:#2a0603;border-color:var(--stop)}
+  button:disabled{opacity:.4}
+  button:focus-visible{outline:2px solid var(--gate);outline-offset:2px}
+
+  #hud{padding:12px 12px 28px}
+
+  .clock{display:flex;align-items:baseline;justify-content:space-between;
+    padding:12px 14px;background:var(--panel2);border:1px solid var(--rule);border-radius:12px}
+  .clock .t{font-size:38px;font-weight:700;letter-spacing:-.02em}
+  .clock .sub{font-size:12px;color:var(--muted);text-align:right;line-height:1.5}
+
+  .counts{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:8px}
+  .cell{background:var(--panel2);border:1px solid var(--rule);border-radius:12px;padding:10px 8px}
+  .cell .n{font-size:30px;font-weight:700;letter-spacing:-.02em;line-height:1.05}
+  .cell .k{font-size:11px;color:var(--muted);margin-top:3px;line-height:1.3}
+  .cell.a .n{color:var(--dirA)} .cell.b .n{color:var(--dirB)} .cell.z .n{color:var(--zone)}
+
+  .rates{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px}
+  .rate{background:var(--panel2);border:1px solid var(--rule);border-radius:12px;padding:10px 12px}
+  .rate .n{font-size:24px;font-weight:700}
+  .rate .k{font-size:11px;color:var(--muted);margin-top:2px}
+
+  #spark{width:100%;height:46px;display:block;margin-top:6px;
+    background:var(--panel2);border:1px solid var(--rule);border-radius:12px}
+
+  .row{display:flex;gap:6px;margin-top:6px}
+  .row button{flex:1}
+
+  details{margin-top:10px;border:1px solid var(--rule);border-radius:12px;background:var(--panel2)}
+  summary{padding:11px 14px;font-size:14px;font-weight:600;cursor:pointer;list-style:none}
+  summary::-webkit-details-marker{display:none}
+  summary::after{content:"+";float:right;color:var(--muted)}
+  details[open] summary::after{content:"–"}
+  .body{padding:0 14px 14px}
+
+  label.f{display:flex;align-items:center;justify-content:space-between;
+    gap:10px;padding:9px 0;font-size:13px;border-top:1px solid var(--rule)}
+  label.f span{color:var(--muted)}
+  input[type=range]{flex:0 0 140px;accent-color:var(--gate)}
+  select,input[type=number]{background:var(--panel);color:var(--ink);border:1px solid var(--rule);
+    border-radius:7px;padding:7px 9px;font-size:13px;font-family:inherit}
+  .val{min-width:44px;text-align:right;font-weight:600}
+
+  #msg{margin-top:8px;font-size:13px;color:var(--muted);line-height:1.45;min-height:1.4em}
+  #msg.err{color:var(--dirB)}
+  .hint{font-size:12px;color:var(--muted);line-height:1.5;margin:8px 0 0}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <video id="vid" playsinline muted autoplay></video>
+  <canvas id="overlay"></canvas>
+
+  <div id="startCard">
+    <button id="btnStart" class="go" style="flex:0;padding:14px 26px;font-size:16px">Turn on camera</button>
+    <p>Point the phone at the street, draw a gate line or a zone, then start the count.</p>
+  </div>
+
+  <div class="float" id="tools" hidden>
+    <button id="btnGate">Gate</button>
+    <button id="btnZone">Zone</button>
+    <button id="btnClear">Clear</button>
+    <button id="btnFlip">Flip</button>
+  </div>
+</div>
+
+<div id="hud">
+
+  <div class="clock">
+    <div class="t" id="clock">15:00</div>
+    <div class="sub">
+      <div id="phase">Ready</div>
+      <div id="fps">—</div>
+    </div>
+  </div>
+
+  <div class="counts">
+    <div class="cell a"><div class="n" id="cA">0</div><div class="k" id="kA">Gate →</div></div>
+    <div class="cell b"><div class="n" id="cB">0</div><div class="k" id="kB">Gate ←</div></div>
+    <div class="cell z"><div class="n" id="cZ">0</div><div class="k">Zone entries</div></div>
+  </div>
+
+  <div class="rates">
+    <div class="rate"><div class="n" id="rMin">0.0</div><div class="k">Pedestrians per minute (gate, both ways)</div></div>
+    <div class="rate"><div class="n" id="rHr">0</div><div class="k">Pedestrians per hour, extrapolated</div></div>
+  </div>
+
+  <canvas id="spark" width="600" height="92"></canvas>
+
+  <div class="row">
+    <button id="btnRun" class="go" disabled>Start count</button>
+    <button id="btnReset">Reset</button>
+  </div>
+  <div class="row">
+    <button id="btnCsv" disabled>Download CSV</button>
+    <button id="btnCopy" disabled>Copy summary</button>
+  </div>
+
+  <div id="msg">Loading the detection model…</div>
+
+  <details>
+    <summary>Counting period</summary>
+    <div class="body">
+      <label class="f"><span>Period</span>
+        <select id="selPeriod">
+          <option value="1">1 minute</option>
+          <option value="5">5 minutes</option>
+          <option value="10">10 minutes</option>
+          <option value="15" selected>15 minutes</option>
+          <option value="30">30 minutes</option>
+          <option value="60">60 minutes</option>
+          <option value="0">Open ended</option>
+        </select>
+      </label>
+      <label class="f"><span>Bin width for the chart</span>
+        <select id="selBin">
+          <option value="15">15 seconds</option>
+          <option value="30">30 seconds</option>
+          <option value="60" selected>1 minute</option>
+          <option value="300">5 minutes</option>
+        </select>
+      </label>
+      <p class="hint">The count stops itself when the period runs out. Per-hour figures are extrapolated from the observed window, so treat short periods as indicative only.</p>
+    </div>
+  </details>
+
+  <details>
+    <summary>Detection</summary>
+    <div class="body">
+      <label class="f"><span>Confidence</span>
+        <input type="range" id="rConf" min="0.15" max="0.85" step="0.05" value="0.45">
+        <b class="val" id="vConf">0.45</b></label>
+      <label class="f"><span>Smallest person, % of frame height</span>
+        <input type="range" id="rMinH" min="2" max="40" step="1" value="6">
+        <b class="val" id="vMinH">6%</b></label>
+      <label class="f"><span>Frames before a track counts</span>
+        <input type="range" id="rHits" min="1" max="8" step="1" value="3">
+        <b class="val" id="vHits">3</b></label>
+      <label class="f"><span>Frames kept after a person is lost</span>
+        <input type="range" id="rMiss" min="2" max="30" step="1" value="12">
+        <b class="val" id="vMiss">12</b></label>
+      <label class="f"><span>Detector input</span>
+        <select id="selSize">
+          <option value="256">256 px — fastest</option>
+          <option value="384" selected>384 px</option>
+          <option value="512">512 px — most accurate</option>
+        </select>
+      </label>
+      <label class="f"><span>Show boxes and tracks</span>
+        <input type="checkbox" id="chkDraw" checked></label>
+      <p class="hint">People are located by the midpoint of the bottom edge of their box — where their feet meet the ground. That point is what crosses the gate and enters the zone.</p>
+    </div>
+  </details>
+
+  <p class="hint">Validate before you trust it: hand-count two minutes of the same view and compare. Accuracy falls off with distance, groups walking abreast, and low light.</p>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+<script>
+"use strict";
+
+/* ---------- element handles ---------- */
+const $ = id => document.getElementById(id);
+const vid=$('vid'), ov=$('overlay'), octx=ov.getContext('2d');
+const msg=$('msg');
+
+/* ---------- state ---------- */
+const S = {
+  model:null, running:false, counting:false,
+  gate:null,                 // {a:{x,y}, b:{x,y}} normalised
+  zone:[],                   // [{x,y}] normalised
+  zoneClosed:false,
+  mode:'none',               // 'gate' | 'zone' | 'none'
+  flip:false,                // swap which gate direction is "→"
+  tracks:[], nextId:1,
+  cA:0, cB:0, cZ:0, occ:0,
+  events:[], bins:[],
+  t0:0, tEnd:0, elapsed:0,
+  binWidth:60, periodMin:15,
+  fpsEMA:0, lastDet:0,
+  wakeLock:null
+};
+
+const cfg = {conf:0.45, minH:0.06, hits:3, miss:12, size:384, draw:true};
+
+/* ---------- offscreen buffer fed to the detector ---------- */
+const buf = document.createElement('canvas');
+const bctx = buf.getContext('2d', {willReadFrequently:true});
+
+/* ---------- geometry helpers ---------- */
+function segHit(p1,p2,p3,p4){
+  // does the walk p1->p2 cross the gate p3->p4?
+  const rx=p2.x-p1.x, ry=p2.y-p1.y, sx=p4.x-p3.x, sy=p4.y-p3.y;
+  const den=rx*sy-ry*sx;
+  if(Math.abs(den)<1e-12) return false;      // parallel
+  const qx=p3.x-p1.x, qy=p3.y-p1.y;
+  const t=(qx*sy-qy*sx)/den;                 // along the walk
+  const u=(qx*ry-qy*rx)/den;                 // along the gate
+  return t>=0&&t<=1&&u>=0&&u<=1;
+}
+function inPoly(pt,poly){
+  let c=false;
+  for(let i=0,j=poly.length-1;i<poly.length;j=i++){
+    const a=poly[i], b=poly[j];
+    if(((a.y>pt.y)!==(b.y>pt.y)) &&
+       (pt.x < (b.x-a.x)*(pt.y-a.y)/((b.y-a.y)||1e-12)+a.x)) c=!c;
+  }
+  return c;
+}
+function iou(a,b){
+  const x1=Math.max(a.x,b.x), y1=Math.max(a.y,b.y);
+  const x2=Math.min(a.x+a.w,b.x+b.w), y2=Math.min(a.y+a.h,b.y+b.h);
+  const iw=Math.max(0,x2-x1), ih=Math.max(0,y2-y1);
+  const inter=iw*ih;
+  return inter/(a.w*a.h+b.w*b.h-inter+1e-9);
+}
+const foot = b => ({x:b.x+b.w/2, y:b.y+b.h});
+
+/* ---------- tracker: greedy IoU with a constant-velocity guess ---------- */
+function track(dets){
+  for(const t of S.tracks){
+    t.pred={x:t.box.x+t.vx, y:t.box.y+t.vy, w:t.box.w, h:t.box.h};
+  }
+  const pairs=[];
+  S.tracks.forEach((t,ti)=>dets.forEach((d,di)=>{
+    const s=iou(t.pred,d);
+    if(s>0.2) pairs.push({s,ti,di});
+  }));
+  pairs.sort((p,q)=>q.s-p.s);
+
+  const usedT=new Set(), usedD=new Set();
+  for(const p of pairs){
+    if(usedT.has(p.ti)||usedD.has(p.di)) continue;
+    usedT.add(p.ti); usedD.add(p.di);
+    const t=S.tracks[p.ti], d=dets[p.di];
+    t.vx=0.6*t.vx+0.4*(d.x-t.box.x);
+    t.vy=0.6*t.vy+0.4*(d.y-t.box.y);
+    t.prev=foot(t.box);
+    t.box={x:0.4*t.box.x+0.6*d.x, y:0.4*t.box.y+0.6*d.y,
+           w:0.5*t.box.w+0.5*d.w, h:0.5*t.box.h+0.5*d.h};
+    t.hits++; t.missed=0;
+  }
+  for(let i=0;i<S.tracks.length;i++){
+    if(usedT.has(i)) continue;
+    const t=S.tracks[i];
+    t.prev=foot(t.box);
+    t.box={...t.box, x:t.box.x+t.vx, y:t.box.y+t.vy};
+    t.missed++;
+  }
+  dets.forEach((d,di)=>{
+    if(usedD.has(di)) return;
+    const f=foot(d);
+    S.tracks.push({id:S.nextId++, box:{...d}, prev:f, vx:0, vy:0,
+                   hits:1, missed:0, inZone:false, counted:{a:0,b:0}});
+  });
+  S.tracks = S.tracks.filter(t=>t.missed<=cfg.miss);
+}
+
+/* ---------- counting ---------- */
+function tally(){
+  if(!S.counting) return;
+  const now=Date.now();
+  for(const t of S.tracks){
+    if(t.hits<cfg.hits || t.missed>0) continue;
+    const f=foot(t.box), p=t.prev;
+    if(!p) continue;
+    const moved=Math.hypot(f.x-p.x, f.y-p.y);
+
+    if(S.gate && S.gate.b && moved>1e-4 && segHit(p,f,S.gate.a,S.gate.b)){
+      const d={x:S.gate.b.x-S.gate.a.x, y:S.gate.b.y-S.gate.a.y};
+      const m={x:f.x-p.x, y:f.y-p.y};
+      let dir = (d.x*m.y - d.y*m.x) > 0 ? 'A' : 'B';
+      if(S.flip) dir = dir==='A' ? 'B' : 'A';
+      if(dir==='A'){S.cA++;} else {S.cB++;}
+      logEvent(now,'gate',t.id,dir==='A'?'→':'←',f);
+      bin(now);
+    }
+    if(S.zoneClosed && S.zone.length>2){
+      const inside=inPoly(f,S.zone);
+      if(inside && !t.inZone){
+        S.cZ++; logEvent(now,'zone_enter',t.id,'in',f); bin(now,true);
+      }
+      if(!inside && t.inZone){ logEvent(now,'zone_exit',t.id,'out',f); }
+      t.inZone=inside;
+    }
+  }
+  S.occ = S.zoneClosed ? S.tracks.filter(t=>t.inZone&&t.hits>=cfg.hits).length : 0;
+}
+function logEvent(t,kind,id,dir,f){
+  S.events.push({t, kind, id, dir, x:+f.x.toFixed(4), y:+f.y.toFixed(4)});
+}
+function bin(now, isZone){
+  const i=Math.floor((now-S.t0)/1000/S.binWidth);
+  while(S.bins.length<=i) S.bins.push({gate:0,zone:0});
+  if(isZone) S.bins[i].zone++; else S.bins[i].gate++;
+}
+
+/* ---------- detection loop ---------- */
+async function detectLoop(){
+  if(!S.running) return;
+  if(S.model && vid.videoWidth){
+    const w=cfg.size, h=Math.round(w*vid.videoHeight/vid.videoWidth);
+    if(buf.width!==w||buf.height!==h){buf.width=w;buf.height=h;}
+    bctx.drawImage(vid,0,0,w,h);
+    let raw=[];
+    try{ raw = await S.model.detect(buf, 25, cfg.conf); }
+    catch(e){ /* transient */ }
+
+    const dets = raw.filter(d=>d.class==='person' && d.bbox[3]/h >= cfg.minH)
+                    .map(d=>({x:d.bbox[0]/w, y:d.bbox[1]/h, w:d.bbox[2]/w, h:d.bbox[3]/h}));
+    track(dets);
+    tally();
+
+    const now=performance.now();
+    if(S.lastDet){
+      const f=1000/Math.max(1,now-S.lastDet);
+      S.fpsEMA = S.fpsEMA ? 0.85*S.fpsEMA+0.15*f : f;
+    }
+    S.lastDet=now;
+  }
+  requestAnimationFrame(detectLoop);
+}
+
+/* ---------- drawing ---------- */
+function fit(){
+  const r=vid.getBoundingClientRect();
+  if(!r.width) return;
+  const dpr=Math.min(2,window.devicePixelRatio||1);
+  ov.width=Math.round(r.width*dpr); ov.height=Math.round(r.height*dpr);
+  ov.style.height=r.height+'px';
+  octx.setTransform(dpr,0,0,dpr,0,0);
+}
+function draw(){
+  const W=ov.width/(Math.min(2,window.devicePixelRatio||1));
+  const H=ov.height/(Math.min(2,window.devicePixelRatio||1));
+  octx.clearRect(0,0,W,H);
+  const X=v=>v*W, Y=v=>v*H;
+
+  if(cfg.draw){
+    for(const t of S.tracks){
+      if(t.hits<cfg.hits) continue;
+      const b=t.box, live=t.missed===0;
+      octx.strokeStyle = t.inZone ? '#F5A524' : (live?'#E6EDF2':'#54697a');
+      octx.lineWidth=2; octx.globalAlpha=live?1:0.5;
+      octx.strokeRect(X(b.x),Y(b.y),X(b.w),Y(b.h));
+      const f=foot(b);
+      octx.fillStyle=octx.strokeStyle;
+      octx.beginPath(); octx.arc(X(f.x),Y(f.y),3.5,0,7); octx.fill();
+      octx.globalAlpha=1;
+    }
+  }
+
+  if(S.zone.length){
+    octx.beginPath();
+    S.zone.forEach((p,i)=> i?octx.lineTo(X(p.x),Y(p.y)):octx.moveTo(X(p.x),Y(p.y)));
+    if(S.zoneClosed) octx.closePath();
+    octx.strokeStyle='#F5A524'; octx.lineWidth=2.5; octx.stroke();
+    if(S.zoneClosed){ octx.fillStyle='rgba(245,165,36,.14)'; octx.fill(); }
+    octx.fillStyle='#F5A524';
+    S.zone.forEach(p=>{octx.beginPath();octx.arc(X(p.x),Y(p.y),6,0,7);octx.fill();});
+  }
+
+  if(S.gate && S.gate.b){
+    const a=S.gate.a,b=S.gate.b;
+    octx.strokeStyle='#35D6C0'; octx.lineWidth=3.5;
+    octx.beginPath(); octx.moveTo(X(a.x),Y(a.y)); octx.lineTo(X(b.x),Y(b.y)); octx.stroke();
+    octx.fillStyle='#35D6C0';
+    [a,b].forEach(p=>{octx.beginPath();octx.arc(X(p.x),Y(p.y),7,0,7);octx.fill();});
+    // arrow showing which side is "→"
+    const mx=(X(a.x)+X(b.x))/2, my=(Y(a.y)+Y(b.y))/2;
+    let nx=-(Y(b.y)-Y(a.y)), ny=(X(b.x)-X(a.x));
+    const L=Math.hypot(nx,ny)||1; nx/=L; ny/=L;
+    if(S.flip){nx=-nx;ny=-ny;}
+    octx.strokeStyle='#6FB6FF'; octx.lineWidth=3;
+    octx.beginPath(); octx.moveTo(mx,my); octx.lineTo(mx+nx*26,my+ny*26); octx.stroke();
+    octx.beginPath();
+    octx.moveTo(mx+nx*32,my+ny*32);
+    octx.lineTo(mx+nx*20-ny*7, my+ny*20+nx*7);
+    octx.lineTo(mx+nx*20+ny*7, my+ny*20-nx*7);
+    octx.fillStyle='#6FB6FF'; octx.fill();
+  }
+  requestAnimationFrame(draw);
+}
+
+/* ---------- clock, rates, chart ---------- */
+function mmss(s){
+  s=Math.max(0,Math.round(s));
+  return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');
+}
+function tickUI(){
+  if(S.counting){
+    S.elapsed=(Date.now()-S.t0)/1000;
+    if(S.periodMin>0){
+      const left=S.periodMin*60-S.elapsed;
+      $('clock').textContent=mmss(left);
+      if(left<=0){ stopCount('Period complete.'); }
+    } else {
+      $('clock').textContent=mmss(S.elapsed);
+    }
+  }
+  $('cA').textContent=S.cA; $('cB').textContent=S.cB; $('cZ').textContent=S.cZ;
+  const mins=S.elapsed/60;
+  const per = mins>0.05 ? (S.cA+S.cB)/mins : 0;
+  $('rMin').textContent=per.toFixed(1);
+  $('rHr').textContent=Math.round(per*60);
+  $('fps').textContent = S.running ? S.fpsEMA.toFixed(1)+' fps · '+S.tracks.length+' tracked' : '—';
+  if(S.zoneClosed) $('cZ').parentElement.querySelector('.k').textContent='Zone entries · '+S.occ+' inside';
+  drawSpark();
+  requestAnimationFrame(tickUI);
+}
+function drawSpark(){
+  const c=$('spark'), g=c.getContext('2d');
+  g.clearRect(0,0,c.width,c.height);
+  const n=Math.max(S.bins.length,1);
+  const max=Math.max(1,...S.bins.map(b=>b.gate+b.zone));
+  const pad=8, bw=(c.width-pad*2)/Math.max(n,6);
+  S.bins.forEach((b,i)=>{
+    const hG=(b.gate/max)*(c.height-pad*2);
+    g.fillStyle='#35D6C0';
+    g.fillRect(pad+i*bw+1, c.height-pad-hG, Math.max(2,bw-2), hG);
+  });
+  g.fillStyle='#8095A3'; g.font='11px system-ui';
+  const unit=S.binWidth>=60 ? (S.binWidth/60)+' min bins' : S.binWidth+' s bins';
+  g.fillText(S.bins.length?unit+' · peak '+max:'Gate crossings over time', pad, 13);
+}
+
+/* ---------- session control ---------- */
+function startCount(){
+  if(!S.gate && !S.zoneClosed){ say('Draw a gate line or close a zone first.',true); return; }
+  resetCounts();
+  S.periodMin=+$('selPeriod').value;
+  S.binWidth=+$('selBin').value;
+  S.t0=Date.now(); S.counting=true;
+  $('btnRun').textContent='Stop count'; $('btnRun').className='stop';
+  $('phase').textContent='Counting';
+  $('btnCsv').disabled=false; $('btnCopy').disabled=false;
+  say('Counting. Keep the phone still — any camera movement will register as pedestrian movement.');
+  lockScreen();
+}
+function stopCount(why){
+  S.counting=false; S.elapsed=(Date.now()-S.t0)/1000;
+  $('btnRun').textContent='Start count'; $('btnRun').className='go';
+  $('phase').textContent='Stopped';
+  $('clock').textContent=mmss(S.elapsed);
+  say((why||'Stopped.')+' '+summaryLine());
+  if(S.wakeLock){S.wakeLock.release().catch(()=>{}); S.wakeLock=null;}
+}
+function resetCounts(){
+  S.cA=S.cB=S.cZ=0; S.occ=0; S.events=[]; S.bins=[]; S.elapsed=0;
+  S.tracks.forEach(t=>{t.inZone=false;});
+}
+function summaryLine(){
+  const m=S.elapsed/60, per=m>0?(S.cA+S.cB)/m:0;
+  return `${S.cA+S.cB} gate crossings in ${m.toFixed(1)} min — ${per.toFixed(1)}/min, ${Math.round(per*60)}/hour.`;
+}
+async function lockScreen(){
+  try{ if('wakeLock' in navigator) S.wakeLock=await navigator.wakeLock.request('screen'); }catch(e){}
+}
+function say(t,err){ msg.textContent=t; msg.className=err?'err':''; }
+
+/* ---------- export ---------- */
+function buildCSV(){
+  const m=S.elapsed/60, per=m>0?(S.cA+S.cB)/m:0, zper=m>0?S.cZ/m:0;
+  const L=[];
+  L.push('# Pedestrian count session');
+  L.push('# started,'+new Date(S.t0).toISOString());
+  L.push('# duration_minutes,'+m.toFixed(3));
+  L.push('# gate_dir_A,'+S.cA);
+  L.push('# gate_dir_B,'+S.cB);
+  L.push('# gate_total,'+(S.cA+S.cB));
+  L.push('# gate_per_minute,'+per.toFixed(3));
+  L.push('# gate_per_hour_extrapolated,'+Math.round(per*60));
+  L.push('# zone_entries,'+S.cZ);
+  L.push('# zone_entries_per_minute,'+zper.toFixed(3));
+  L.push('# zone_entries_per_hour_extrapolated,'+Math.round(zper*60));
+  L.push('# confidence,'+cfg.conf+',min_height_frac,'+cfg.minH+',min_hits,'+cfg.hits);
+  L.push('');
+  L.push('bin_start_s,bin_end_s,gate_crossings,zone_entries,gate_per_minute');
+  S.bins.forEach((b,i)=>{
+    L.push([i*S.binWidth,(i+1)*S.binWidth,b.gate,b.zone,
+            (b.gate/(S.binWidth/60)).toFixed(2)].join(','));
+  });
+  L.push('');
+  L.push('event_time_iso,seconds_from_start,event,track_id,direction,x_norm,y_norm');
+  S.events.forEach(e=>{
+    L.push([new Date(e.t).toISOString(),((e.t-S.t0)/1000).toFixed(2),
+            e.kind,e.id,e.dir,e.x,e.y].join(','));
+  });
+  return L.join('\n');
+}
+function download(){
+  const blob=new Blob([buildCSV()],{type:'text/csv'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='pedcount_'+new Date(S.t0).toISOString().replace(/[:.]/g,'-')+'.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href),4000);
+}
+
+/* ---------- pointer input for gate and zone ---------- */
+function ptFromEvent(e){
+  const r=ov.getBoundingClientRect();
+  return {x:Math.min(1,Math.max(0,(e.clientX-r.left)/r.width)),
+          y:Math.min(1,Math.max(0,(e.clientY-r.top)/r.height))};
+}
+let drag=null;
+ov.addEventListener('pointerdown',e=>{
+  e.preventDefault();
+  const p=ptFromEvent(e);
+  // grab an existing handle first
+  const near=(q)=>Math.hypot(q.x-p.x,q.y-p.y)<0.05;
+  if(S.gate){
+    if(near(S.gate.a)){drag={kind:'gateA'};return;}
+    if(near(S.gate.b)){drag={kind:'gateB'};return;}
+  }
+  for(let i=0;i<S.zone.length;i++) if(near(S.zone[i])){drag={kind:'zone',i};return;}
+
+  if(S.mode==='gate'){
+    if(!S.gate || S.gate.b) S.gate={a:p,b:null};
+    else { S.gate.b=p; }
+    if(S.gate && !S.gate.b) drag={kind:'newGate'};
+    else { setMode('none'); say('Gate set. Drag the endpoints to adjust, or tap Flip to swap directions.'); }
+  } else if(S.mode==='zone'){
+    if(S.zoneClosed){ S.zone=[]; S.zoneClosed=false; }
+    S.zone.push(p);
+    if(S.zone.length>=3) $('btnZone').textContent='Close zone';
+  }
+  ready();
+},{passive:false});
+ov.addEventListener('pointermove',e=>{
+  if(!drag) return;
+  e.preventDefault();
+  const p=ptFromEvent(e);
+  if(drag.kind==='gateA') S.gate.a=p;
+  else if(drag.kind==='gateB'||drag.kind==='newGate') S.gate.b=p;
+  else if(drag.kind==='zone') S.zone[drag.i]=p;
+},{passive:false});
+ov.addEventListener('pointerup',()=>{
+  if(drag && drag.kind==='newGate' && S.gate && S.gate.b){ setMode('none'); }
+  drag=null; ready();
+});
+
+function setMode(m){
+  S.mode=m;
+  $('btnGate').className = m==='gate'?'on':'';
+  $('btnZone').className = m==='zone'?'on':'';
+  if(m!=='zone') $('btnZone').textContent='Zone';
+}
+function ready(){
+  $('btnRun').disabled = !(S.model && S.running && (S.gate&&S.gate.b || S.zoneClosed));
+}
+
+/* ---------- wiring ---------- */
+$('btnGate').onclick=()=>{ setMode(S.mode==='gate'?'none':'gate');
+  if(S.mode==='gate') say('Tap once for each end of the gate line.'); };
+$('btnZone').onclick=()=>{
+  if(S.mode==='zone' && S.zone.length>=3){ S.zoneClosed=true; setMode('none');
+    say('Zone closed. Anyone whose feet enter it is counted once.'); ready(); return; }
+  setMode(S.mode==='zone'?'none':'zone');
+  if(S.mode==='zone'){ S.zone=[]; S.zoneClosed=false;
+    say('Tap three or more corners, then tap Close zone.'); }
+};
+$('btnClear').onclick=()=>{ S.gate=null; S.zone=[]; S.zoneClosed=false;
+  setMode('none'); ready(); say('Gate and zone cleared.'); };
+$('btnFlip').onclick=()=>{ S.flip=!S.flip;
+  $('kA').textContent = S.flip?'Gate ←':'Gate →';
+  $('kB').textContent = S.flip?'Gate →':'Gate ←'; };
+$('btnRun').onclick=()=> S.counting ? stopCount('Stopped early.') : startCount();
+$('btnReset').onclick=()=>{ S.counting=false; resetCounts();
+  $('clock').textContent = mmss((+$('selPeriod').value)*60);
+  $('phase').textContent='Ready'; $('btnRun').textContent='Start count';
+  $('btnRun').className='go'; say('Counts cleared.'); };
+$('btnCsv').onclick=download;
+$('btnCopy').onclick=()=>{
+  navigator.clipboard.writeText(buildCSV().split('\n').filter(l=>l.startsWith('#')).join('\n'))
+    .then(()=>say('Summary copied.')).catch(()=>say('Could not copy.',true));
+};
+$('selPeriod').onchange=e=>{ S.periodMin=+e.target.value;
+  if(!S.counting) $('clock').textContent = S.periodMin?mmss(S.periodMin*60):'00:00'; };
+$('selBin').onchange=e=>{ S.binWidth=+e.target.value; };
+
+const bindRange=(id,vid2,key,fmt)=>{
+  $(id).oninput=e=>{ cfg[key]= key==='minH' ? +e.target.value/100 : +e.target.value;
+    $(vid2).textContent=fmt(e.target.value); };
+};
+bindRange('rConf','vConf','conf',v=>(+v).toFixed(2));
+bindRange('rMinH','vMinH','minH',v=>v+'%');
+bindRange('rHits','vHits','hits',v=>v);
+bindRange('rMiss','vMiss','miss',v=>v);
+$('selSize').onchange=e=>{cfg.size=+e.target.value;};
+$('chkDraw').onchange=e=>{cfg.draw=e.target.checked;};
+
+/* ---------- camera + model boot ---------- */
+$('btnStart').onclick=async()=>{
+  try{
+    const stream=await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:{ideal:'environment'},
+             width:{ideal:1280}, height:{ideal:720}},
+      audio:false});
+    vid.srcObject=stream;
+    await vid.play();
+    $('startCard').hidden=true; $('tools').hidden=false;
+    S.running=true;
+    fit(); detectLoop();
+    say(S.model? 'Camera on. Draw a gate or a zone.' : 'Camera on. Still loading the model…');
+    ready();
+  }catch(err){
+    say('The camera did not open: '+err.name+'. Camera access needs an https page, and in Safari it must be the top-level page rather than an embedded frame.',true);
+  }
+};
+
+window.addEventListener('resize',()=>setTimeout(fit,120));
+window.addEventListener('orientationchange',()=>setTimeout(fit,400));
+vid.addEventListener('loadedmetadata',fit);
+document.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState==='visible' && S.counting) lockScreen();
+});
+
+(async function boot(){
+  draw(); tickUI();
+  try{
+    S.model = await cocoSsd.load({base:'lite_mobilenet_v2'});
+    say(S.running ? 'Model ready. Draw a gate or a zone.' : 'Model ready. Turn on the camera.');
+    ready();
+  }catch(e){
+    say('The detection model failed to download. Check the connection and reload.',true);
+  }
+})();
+</script>
+</body>
+</html>
