@@ -4,7 +4,7 @@ A browser-based pedestrian counter that runs on a phone camera in real time. Dra
 
 Everything runs locally in the browser. No video is uploaded, recorded, or sent anywhere — only counts and event timestamps leave the page, and only when you export them yourself.
 
-**Live app:** https://YOUR-USERNAME.github.io/pedcount/
+**Live app:** https://asevtsuk.github.io/pdestrian-counter-for-phone/ 
 
 ## Requirements
 
@@ -58,23 +58,45 @@ A track must survive a minimum number of consecutive frames before it is eligibl
 
 Record the values you used. They are written into the CSV header.
 
-## CSV output
+## Output
 
-Three blocks in one file.
+**Download ZIP** produces `session.csv` plus one JPEG per snapshot. **CSV only** gives the table without the images. The ZIP is written store-only — the JPEGs are already compressed — so any unzip tool opens it.
+
+### Reference snapshots
+
+The app saves a 640 px JPEG of the same cropped view the detector sees, so a session carries visual evidence of what was actually counted. It captures one at the start, then only on a meaningful change:
+
+- **Position** — the phone moves further than the distance threshold (10 m by default) from where the last snapshot was taken, measured by equirectangular approximation against the live GPS watch
+- **View** — the scene itself changes. Each frame is reduced to a 32×32 greyscale signature and compared to the signature at the last snapshot; when the mean absolute difference exceeds the sensitivity threshold on two consecutive checks, two and a half seconds apart, a new snapshot is taken. Requiring two consecutive checks stops a passing lorry or a group filling the frame from triggering one, while a genuine change of camera angle triggers immediately
+
+Both thresholds are adjustable, there is a manual capture button, and the whole feature can be switched off. Sessions are capped at 40 snapshots.
+
+Every gate crossing and zone entry records the `snapshot_id` in force when it happened, so counts join to the image showing the view they came from.
+
+### CSV structure
+
+Four blocks in one file.
 
 **Header** — session start, duration, camera position and bearing, directional and total gate counts, zone entries, per-minute and extrapolated per-hour rates, and the detection settings in force.
 
 **Bins** — one row per time bin:
 `bin_start_s, bin_end_s, gate_crossings, zone_entries, gate_per_minute, camera_lat, camera_lon`
 
+**Snapshots** — one row per reference photo:
+`snapshot_id, file, time_iso, seconds_from_start, reason, lat, lon, gps_accuracy_m, bearing_deg, zoom, width_px, height_px`
+
+`reason` records why it was taken: `session_start`, `moved_<n>m`, `view_changed`, or `manual`.
+
 **Events** — one row per crossing or entry:
-`event_time_iso, seconds_from_start, event, track_id, direction, x_norm, y_norm, camera_lat, camera_lon, camera_bearing_deg`
+`event_time_iso, seconds_from_start, event, track_id, direction, x_norm, y_norm, camera_lat, camera_lon, camera_bearing_deg, snapshot_id`
+
+`direction` is `L2R` or `R2L` — rightward or leftward across the screen.
 
 Two coordinate systems are recorded, and they mean different things.
 
 `x_norm` and `y_norm` are **image** coordinates: the position of the person's feet within the video frame at the instant of the crossing, normalised to 0–1 with the origin at the top-left. They tell you where along the gate someone passed, not where they were on the earth. They can be converted to ground coordinates only if you rectify the view — for example by homography from four known points visible in the frame.
 
-`camera_lat` and `camera_lon` are **WGS84** coordinates of the phone, taken from the device GPS when the count starts, and repeated on every row so each block loads directly into GIS without a join. `camera_bearing_deg` is the compass bearing the phone was facing, from the magnetometer, where available. Every count in a session shares one camera position — the observer's location, not the pedestrian's.
+`camera_lat` and `camera_lon` are **WGS84** coordinates of the phone. Event rows carry the live position at the moment of that crossing; the header records the fix at session start. `camera_bearing_deg` is the compass bearing the phone was facing, from the magnetometer, where available. Every count in a session shares one camera position — the observer's location, not the pedestrian's.
 
 Accuracy is recorded in the header as `camera_gps_accuracy_m`. Phone GPS in a street canyon is commonly 10–30 m, which is coarser than the sidewalk you are counting; for anything requiring precise placement, snap the point to the surveyed segment afterwards rather than trusting the raw fix.
 
@@ -95,7 +117,9 @@ The counts are not a replacement for a validated fixed sensor. They are a fast f
 
 ## Privacy
 
-Video frames are processed in memory and discarded. Nothing is written to disk, no frames are transmitted, and the exported CSV contains only counts, timestamps, and normalised positions — no imagery and no identifying information.
+Video frames are processed in memory and discarded, and nothing is transmitted anywhere — all detection runs on the device.
+
+Reference snapshots are the exception, and the one part of this worth thinking about before you deploy. They are photographs of public space that may contain recognisable people, they are written into the ZIP you download, and they change the review picture accordingly. Snapshots can be switched off entirely under *Snapshots*, in which case the export contains only counts, timestamps and coordinates. If you keep them, treat the ZIP as image data and store it as such.
 
 Filming in public space may still be subject to local law and to your institution's human subjects review, particularly where the view includes private property or where you intend to publish. Check before deploying, even though no imagery is retained.
 
