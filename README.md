@@ -1,5 +1,3 @@
-# pedestrian-counter-for-phone
-pedestrian_counter
 # pedcount
 
 A browser-based pedestrian counter that runs on a phone camera in real time. Draw a gate line across a sidewalk and it counts people crossing it in each direction; draw a polygon and it counts people entering it. Timed counting periods, live rates, CSV export.
@@ -33,7 +31,9 @@ You can use a gate and a zone at the same time. They are counted independently.
 
 ## How it works
 
-Frames are drawn to an offscreen canvas at reduced resolution and passed to **COCO-SSD (MobileNetV2 lite)** via TensorFlow.js, running on the WebGL backend. Only the `person` class is retained.
+Frames are letterboxed to 640×640 and passed to **YOLOv8n** in ONNX format, running through ONNX Runtime Web. WebGPU is used where the browser provides it, falling back to WebAssembly. The raw `(1, 84, 8400)` output is decoded for class 0 (`person`) and reduced by non-maximum suppression at IoU 0.45. The backend actually in use is shown under Detection settings.
+
+**COCO-SSD (MobileNetV2 lite)** remains selectable as a faster, markedly less accurate alternative — useful on older devices where YOLOv8n runs too slowly to track walking pace. You can also supply your own `.onnx` export through the file picker, provided it uses the YOLOv8 detection head with a 640×640 input.
 
 Detections are linked across frames by a lightweight tracker: boxes are advanced by a per-track velocity estimate, then matched greedily to new detections by intersection-over-union above 0.2. Unmatched detections start new tracks; unmatched tracks coast on their velocity and are dropped after a configurable number of missed frames.
 
@@ -52,7 +52,8 @@ A track must survive a minimum number of consecutive frames before it is eligibl
 | Smallest person | Ignores boxes below this fraction of frame height. The main defence against noise at the far end of the view |
 | Frames before a track counts | Higher values reject flicker but delay counting of fast movers |
 | Frames kept after a person is lost | How long a track coasts through an occlusion before being discarded. Raise it where people pass behind obstacles |
-| Detector input | 256 / 384 / 512 px. Larger is more accurate on small figures and slower |
+| Detector input | COCO-SSD only. YOLOv8n has a fixed 640 px input |
+| Model | YOLOv8n or COCO-SSD, plus your own ONNX export |
 
 Record the values you used. They are written into the CSV header.
 
@@ -60,14 +61,21 @@ Record the values you used. They are written into the CSV header.
 
 Three blocks in one file.
 
-**Header** — session start, duration, directional and total gate counts, zone entries, per-minute and extrapolated per-hour rates, and the detection settings in force.
+**Header** — session start, duration, camera position and bearing, directional and total gate counts, zone entries, per-minute and extrapolated per-hour rates, and the detection settings in force.
 
-**Bins** — one row per time bin: `bin_start_s, bin_end_s, gate_crossings, zone_entries, gate_per_minute`
+**Bins** — one row per time bin:
+`bin_start_s, bin_end_s, gate_crossings, zone_entries, gate_per_minute, camera_lat, camera_lon`
 
 **Events** — one row per crossing or entry:
-`event_time_iso, seconds_from_start, event, track_id, direction, x_norm, y_norm`
+`event_time_iso, seconds_from_start, event, track_id, direction, x_norm, y_norm, camera_lat, camera_lon, camera_bearing_deg`
 
-Coordinates are normalised to the frame (0–1, origin top-left), so they remain meaningful across resolutions and can be mapped back to ground coordinates if you rectify the view.
+Two coordinate systems are recorded, and they mean different things.
+
+`x_norm` and `y_norm` are **image** coordinates: the position of the person's feet within the video frame at the instant of the crossing, normalised to 0–1 with the origin at the top-left. They tell you where along the gate someone passed, not where they were on the earth. They can be converted to ground coordinates only if you rectify the view — for example by homography from four known points visible in the frame.
+
+`camera_lat` and `camera_lon` are **WGS84** coordinates of the phone, taken from the device GPS when the count starts, and repeated on every row so each block loads directly into GIS without a join. `camera_bearing_deg` is the compass bearing the phone was facing, from the magnetometer, where available. Every count in a session shares one camera position — the observer's location, not the pedestrian's.
+
+Accuracy is recorded in the header as `camera_gps_accuracy_m`. Phone GPS in a street canyon is commonly 10–30 m, which is coarser than the sidewalk you are counting; for anything requiring precise placement, snap the point to the surveyed segment afterwards rather than trusting the raw fix.
 
 ## Accuracy and limitations
 
@@ -92,4 +100,4 @@ Filming in public space may still be subject to local law and to your institutio
 
 ## License and credits
 
-Detection model: [COCO-SSD](https://github.com/tensorflow/tfjs-models/tree/master/coco-ssd), TensorFlow.js, Apache 2.0.
+Detection: [YOLOv8n](https://github.com/ultralytics/ultralytics) via [ONNX Runtime Web](https://onnxruntime.ai/). YOLOv8 is AGPL-3.0 — note that this carries obligations if you redistribute a modified version of this tool. Fallback model: [COCO-SSD](https://github.com/tensorflow/tfjs-models/tree/master/coco-ssd), TensorFlow.js, Apache 2.0.
