@@ -25,13 +25,19 @@
     font-variant-numeric:tabular-nums;overscroll-behavior:none}
   body{padding-bottom:env(safe-area-inset-bottom)}
 
-  #stage{position:relative;width:100%;background:#000;line-height:0}
-  #vid{width:100%;height:auto;display:block}
+  #stage{position:relative;width:100%;min-height:58vh;background:#000;line-height:0}
+  #vid{width:100%;height:auto;min-height:58vh;display:block;object-fit:cover;background:#000}
   #overlay{position:absolute;left:0;top:0;width:100%;height:100%;touch-action:none}
 
   #startCard{position:absolute;inset:0;display:flex;flex-direction:column;
     align-items:center;justify-content:center;gap:14px;background:#000;line-height:1.4;padding:24px;text-align:center}
   #startCard p{margin:0;color:var(--muted);font-size:14px;max-width:34ch}
+  #startMsg{color:var(--dirB);font-size:13px;max-width:36ch;line-height:1.45;
+    word-break:break-word;min-height:1em}
+
+  #banner{position:fixed;left:0;right:0;top:0;z-index:99;display:none;
+    background:var(--stop);color:#2a0603;padding:10px 14px;font-size:13px;
+    font-weight:600;line-height:1.4;word-break:break-word}
 
   .float{position:absolute;left:10px;right:10px;bottom:10px;display:flex;gap:6px;line-height:1}
   .float button{flex:1}
@@ -93,6 +99,8 @@
 </head>
 <body>
 
+<div id="banner"></div>
+
 <div id="stage">
   <video id="vid" playsinline muted autoplay></video>
   <canvas id="overlay"></canvas>
@@ -100,6 +108,7 @@
   <div id="startCard">
     <button id="btnStart" class="go" style="flex:0;padding:14px 26px;font-size:16px">Turn on camera</button>
     <p>Point the phone at the street, draw a gate line or a zone, then start the count.</p>
+    <div id="startMsg"></div>
   </div>
 
   <div class="float" id="tools" hidden>
@@ -210,6 +219,55 @@
 const $ = id => document.getElementById(id);
 const vid=$('vid'), ov=$('overlay'), octx=ov.getContext('2d');
 const msg=$('msg');
+
+/* ---------- make failures visible instead of silent ---------- */
+function banner(t){
+  const b=$('banner');
+  b.textContent=t; b.style.display='block';
+}
+window.addEventListener('error', e=>{
+  banner('Script error: '+(e.message||'unknown')+
+         (e.filename?' — '+e.filename.split('/').pop()+':'+e.lineno:''));
+});
+window.addEventListener('unhandledrejection', e=>{
+  banner('Unhandled error: '+(e.reason&&e.reason.message||e.reason));
+});
+
+/* ---------- camera: wired first so nothing downstream can block it ---------- */
+async function startCamera(){
+  const sm=$('startMsg');
+  sm.textContent='';
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    sm.textContent = window.isSecureContext
+      ? 'This browser does not expose a camera API to web pages.'
+      : 'The page is not on a secure origin, so the browser hides the camera. Open it over https.';
+    return;
+  }
+  try{
+    const stream=await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:{ideal:'environment'}, width:{ideal:1280}, height:{ideal:720}},
+      audio:false});
+    vid.srcObject=stream;
+    vid.setAttribute('playsinline','');
+    try{ await vid.play(); }catch(e){ /* autoplay guard; the stream still shows */ }
+    $('startCard').hidden=true; $('tools').hidden=false;
+    S.running=true;
+    fit(); detectLoop();
+    say(S.model ? 'Camera on. Draw a gate or a zone.' : 'Camera on. Still loading the model…');
+    ready();
+  }catch(err){
+    const n=err.name||'Error';
+    const help = {
+      NotAllowedError:'Camera access was refused. In Safari, open the "aA" menu in the address bar → Website Settings → Camera → Allow, then reload.',
+      NotFoundError:'No camera was found on this device.',
+      NotReadableError:'Another app is holding the camera. Close it and reload.',
+      SecurityError:'The browser blocked the camera. The page must be the top-level tab on an https address, not an embedded frame.',
+      OverconstrainedError:'The requested camera settings are unavailable on this device.'
+    }[n] || (n+': '+(err.message||''));
+    sm.textContent=help;
+  }
+}
+document.getElementById('btnStart').addEventListener('click', startCamera);
 
 /* ---------- state ---------- */
 const S = {
@@ -637,25 +695,7 @@ bindRange('rMiss','vMiss','miss',v=>v);
 $('selSize').onchange=e=>{cfg.size=+e.target.value;};
 $('chkDraw').onchange=e=>{cfg.draw=e.target.checked;};
 
-/* ---------- camera + model boot ---------- */
-$('btnStart').onclick=async()=>{
-  try{
-    const stream=await navigator.mediaDevices.getUserMedia({
-      video:{facingMode:{ideal:'environment'},
-             width:{ideal:1280}, height:{ideal:720}},
-      audio:false});
-    vid.srcObject=stream;
-    await vid.play();
-    $('startCard').hidden=true; $('tools').hidden=false;
-    S.running=true;
-    fit(); detectLoop();
-    say(S.model? 'Camera on. Draw a gate or a zone.' : 'Camera on. Still loading the model…');
-    ready();
-  }catch(err){
-    say('The camera did not open: '+err.name+'. Camera access needs an https page, and in Safari it must be the top-level page rather than an embedded frame.',true);
-  }
-};
-
+/* ---------- lifecycle ---------- */
 window.addEventListener('resize',()=>setTimeout(fit,120));
 window.addEventListener('orientationchange',()=>setTimeout(fit,400));
 vid.addEventListener('loadedmetadata',fit);
@@ -665,12 +705,18 @@ document.addEventListener('visibilitychange',()=>{
 
 (async function boot(){
   draw(); tickUI();
+  if(typeof tf==='undefined' || typeof cocoSsd==='undefined'){
+    banner('The TensorFlow.js scripts did not load. Check the network connection, or any content blocker that might be blocking cdn.jsdelivr.net, then reload.');
+    say('Detection library unavailable — the camera will still open, but nothing will be counted.',true);
+    return;
+  }
   try{
     S.model = await cocoSsd.load({base:'lite_mobilenet_v2'});
     say(S.running ? 'Model ready. Draw a gate or a zone.' : 'Model ready. Turn on the camera.');
     ready();
   }catch(e){
-    say('The detection model failed to download. Check the connection and reload.',true);
+    banner('The detection model failed to download: '+(e.message||e));
+    say('Model download failed. Check the connection and reload.',true);
   }
 })();
 </script>
