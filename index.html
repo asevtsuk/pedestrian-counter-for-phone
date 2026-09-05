@@ -170,8 +170,9 @@
     <button id="btnReset">Reset counts</button>
   </div>
   <div class="row">
-    <button id="btnCsv" disabled>Download CSV</button>
-    <button id="btnCopy" disabled>Copy summary</button>
+    <button id="btnZip" disabled>Download ZIP</button>
+    <button id="btnCsv" disabled>CSV only</button>
+    <button id="btnCopy" disabled>Copy</button>
   </div>
 
   <div id="msg">Loading the detection model…</div>
@@ -199,6 +200,23 @@
         </select>
       </label>
       <p class="hint">The count stops itself when the period runs out. Per-hour figures are extrapolated from the observed window, so treat short periods as indicative only.</p>
+    </div>
+  </details>
+
+  <details>
+    <summary>Snapshots</summary>
+    <div class="body">
+      <label class="f"><span>Capture reference photos</span>
+        <input type="checkbox" id="chkSnap" checked></label>
+      <label class="f"><span>New photo after moving</span>
+        <input type="range" id="rDist" min="5" max="100" step="5" value="10">
+        <b class="val" id="vDist">10 m</b></label>
+      <label class="f"><span>View-change sensitivity</span>
+        <input type="range" id="rScene" min="8" max="60" step="2" value="22">
+        <b class="val" id="vScene">22</b></label>
+      <label class="f"><span>Captured this session</span><b class="val" id="vSnaps">0</b></label>
+      <div class="row"><button id="btnSnap">Take one now</button></div>
+      <p class="hint">A 640 px JPEG of the same cropped view the detector sees. One at the start, then only when the phone moves beyond the distance above or the scene itself changes. Lower the sensitivity number to trigger more readily; raise it if passing vehicles set it off.</p>
     </div>
   </details>
 
@@ -317,12 +335,14 @@ const S = {
   t0:0, tEnd:0, elapsed:0,
   binWidth:60, periodMin:15,
   fpsEMA:0, lastDet:0,
-  geo:null, geoErr:null, heading:null,
+  geo:null, geoErr:null, heading:null, geoWatch:null,
+  snaps:[], lastSig:null, snapGeo:null, sceneStreak:0, viewTimer:null,
   engine:'yolo', backend:null,
   wakeLock:null
 };
 
-const cfg = {conf:0.45, minH:0.06, hits:3, miss:12, size:384, draw:true};
+const cfg = {conf:0.45, minH:0.06, hits:3, miss:12, size:384, draw:true,
+             snapDist:10, snapScene:22, snapOn:true};
 
 /* ---------- offscreen buffer fed to the detector ---------- */
 const buf = document.createElement('canvas');
@@ -432,7 +452,9 @@ function tally(){
   S.occ = S.zoneClosed ? S.tracks.filter(t=>t.inZone&&t.hits>=cfg.hits).length : 0;
 }
 function logEvent(t,kind,id,dir,f){
-  S.events.push({t, kind, id, dir, x:+f.x.toFixed(4), y:+f.y.toFixed(4)});
+  S.events.push({t, kind, id, dir, x:+f.x.toFixed(4), y:+f.y.toFixed(4),
+    lat:S.geo?S.geo.lat:null, lon:S.geo?S.geo.lon:null,
+    snap:S.snaps.length?S.snaps[S.snaps.length-1].id:''});
 }
 function bin(now, isZone){
   const i=Math.floor((now-S.t0)/1000/S.binWidth);
@@ -627,6 +649,7 @@ function tickUI(){
   $('rHr').textContent=Math.round(per*60);
   $('fps').textContent = S.running ? S.fpsEMA.toFixed(1)+' fps · '+S.tracks.length+' tracked' : '—';
   $('geo').textContent = geoText();
+  $('vSnaps').textContent = S.snaps.length;
   if(S.zoneClosed) $('cZ').parentElement.querySelector('.k').textContent='Zone entries · '+S.occ+' inside';
   drawSpark();
   requestAnimationFrame(tickUI);
@@ -701,6 +724,93 @@ function geoText(){
   return S.geoErr ? 'Location: '+S.geoErr : 'No location fix';
 }
 
+/* ---------- snapshots: one per meaningful change of view ---------- */
+const snapCv=document.createElement('canvas'), snapCtx=snapCv.getContext('2d');
+const sigCv=document.createElement('canvas'); sigCv.width=32; sigCv.height=32;
+const sigCtx=sigCv.getContext('2d',{willReadFrequently:true});
+const SNAP_MAX=40;
+
+const CRC=(()=>{const t=new Int32Array(256);
+  for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++)c=c&1?0xEDB88320^(c>>>1):c>>>1;t[n]=c;}
+  return b=>{let c=-1;for(let i=0;i<b.length;i++)c=(c>>>8)^t[(c^b[i])&0xFF];return (c^-1)>>>0;};})();
+
+function makeZip(files){
+  const enc=new TextEncoder(), parts=[], central=[];
+  let off=0;
+  const u16=v=>[v&255,(v>>8)&255];
+  const u32=v=>[v&255,(v>>8)&255,(v>>16)&255,(v>>24)&255];
+  const d=new Date(), dt=((d.getHours()<<11)|(d.getMinutes()<<5)|(d.getSeconds()>>1)),
+        dd=(((d.getFullYear()-1980)<<9)|((d.getMonth()+1)<<5)|d.getDate());
+  for(const f of files){
+    const nm=enc.encode(f.name), crc=CRC(f.bytes), sz=f.bytes.length;
+    const lh=Uint8Array.from([...u32(0x04034b50),...u16(20),...u16(0),...u16(0),
+      ...u16(dt),...u16(dd),...u32(crc),...u32(sz),...u32(sz),...u16(nm.length),...u16(0)]);
+    parts.push(lh,nm,f.bytes);
+    central.push(Uint8Array.from([...u32(0x02014b50),...u16(20),...u16(20),...u16(0),...u16(0),
+      ...u16(dt),...u16(dd),...u32(crc),...u32(sz),...u32(sz),
+      ...u16(nm.length),...u16(0),...u16(0),...u16(0),...u16(0),...u32(0),...u32(off)]),nm);
+    off+=lh.length+nm.length+sz;
+  }
+  const cstart=off; let clen=0; for(const c of central) clen+=c.length;
+  const eocd=Uint8Array.from([...u32(0x06054b50),...u16(0),...u16(0),
+    ...u16(files.length),...u16(files.length),...u32(clen),...u32(cstart),...u16(0)]);
+  const all=[...parts,...central,eocd];
+  let total=0; for(const a of all) total+=a.length;
+  const out=new Uint8Array(total); let p=0;
+  for(const a of all){ out.set(a,p); p+=a.length; }
+  return out;
+}
+
+function sceneSig(){
+  const c=cropRect();
+  sigCtx.drawImage(vid, c.sx,c.sy,c.sw,c.sh, 0,0,32,32);
+  const d=sigCtx.getImageData(0,0,32,32).data, s=new Uint8Array(1024);
+  for(let i=0,p=0;i<1024;i++,p+=4) s[i]=(d[p]*0.299+d[p+1]*0.587+d[p+2]*0.114)|0;
+  return s;
+}
+function sigDiff(a,b){
+  if(!a||!b) return 255;
+  let t=0; for(let i=0;i<a.length;i++) t+=Math.abs(a[i]-b[i]);
+  return t/a.length;
+}
+function metres(a,b){
+  if(!a||!b) return Infinity;
+  const R=6371000, r=Math.PI/180;
+  const dφ=(b.lat-a.lat)*r, dλ=(b.lon-a.lon)*r, φ=(a.lat+b.lat)/2*r;
+  return Math.hypot(dφ, dλ*Math.cos(φ))*R;
+}
+
+async function snapshot(reason){
+  if(!vid.videoWidth || S.snaps.length>=SNAP_MAX) return;
+  const c=cropRect();
+  const w=640, h=Math.max(1,Math.round(w*c.sh/c.sw));
+  snapCv.width=w; snapCv.height=h;
+  snapCtx.drawImage(vid, c.sx,c.sy,c.sw,c.sh, 0,0,w,h);
+  const blob=await new Promise(r=>snapCv.toBlob(r,'image/jpeg',0.72));
+  if(!blob) return;
+  const id='snap_'+String(S.snaps.length+1).padStart(3,'0');
+  S.snaps.push({id, name:id+'.jpg', bytes:new Uint8Array(await blob.arrayBuffer()),
+    t:Date.now(), reason, zoom:S.zoom,
+    lat:S.geo?S.geo.lat:null, lon:S.geo?S.geo.lon:null,
+    acc:S.geo?S.geo.acc:null, heading:S.heading, w, h});
+  S.lastSig=sceneSig();
+  S.snapGeo=S.geo?{lat:S.geo.lat,lon:S.geo.lon}:null;
+  S.sceneStreak=0;
+}
+
+/* checked every couple of seconds while counting */
+async function watchView(){
+  if(!S.counting || !S.running || !vid.videoWidth) return;
+  if(S.snapGeo && S.geo && metres(S.snapGeo,S.geo) > cfg.snapDist){
+    await snapshot('moved_'+Math.round(metres(S.snapGeo,S.geo))+'m'); return;
+  }
+  const d=sigDiff(S.lastSig, sceneSig());
+  if(d > cfg.snapScene){
+    S.sceneStreak++;
+    if(S.sceneStreak>=2) await snapshot('view_changed');   // two in a row, not a passing lorry
+  } else S.sceneStreak=0;
+}
+
 /* ---------- session control ---------- */
 function startCount(){
   if(!S.gate && !S.zoneClosed){ say('Draw a gate line or close a zone first.',true); return; }
@@ -710,21 +820,35 @@ function startCount(){
   S.t0=Date.now(); S.counting=true;
   $('btnRun').textContent='Stop'; $('btnRun').className='stop';
   $('phase').textContent='Counting';
-  $('btnCsv').disabled=false; $('btnCopy').disabled=false;
+  $('btnCsv').disabled=false; $('btnCopy').disabled=false; $('btnZip').disabled=false;
   say('Counting. Keep the phone still — any camera movement will register as pedestrian movement.');
   lockScreen();
-  fixLocation(); fixHeading();   // recorded against this session, not awaited
+  fixHeading();
+  fixLocation().then(()=>{ if(cfg.snapOn) snapshot('session_start'); });
+  if(navigator.geolocation && !S.geoWatch){
+    S.geoWatch=navigator.geolocation.watchPosition(
+      p=>{ S.geo={lat:p.coords.latitude, lon:p.coords.longitude,
+                  acc:p.coords.accuracy, alt:p.coords.altitude, t:p.timestamp};
+           S.geoErr=null; },
+      ()=>{}, {enableHighAccuracy:true, maximumAge:5000, timeout:20000});
+  }
+  clearInterval(S.viewTimer);
+  if(cfg.snapOn) S.viewTimer=setInterval(watchView, 2500);
 }
 function stopCount(why){
   S.counting=false; S.elapsed=(Date.now()-S.t0)/1000;
   $('btnRun').textContent='Start'; $('btnRun').className='go';
   $('phase').textContent='Stopped';
   $('clock').textContent=mmss(S.elapsed); $('miniClock').textContent=mmss(S.elapsed);
-  say((why||'Stopped.')+' '+summaryLine());
+  say((why||'Stopped.')+' '+summaryLine()+
+      (S.snaps.length?' '+S.snaps.length+' snapshot'+(S.snaps.length>1?'s':'')+' captured.':''));
+  clearInterval(S.viewTimer); S.viewTimer=null;
+  if(S.geoWatch!=null){ navigator.geolocation.clearWatch(S.geoWatch); S.geoWatch=null; }
   if(S.wakeLock){S.wakeLock.release().catch(()=>{}); S.wakeLock=null;}
 }
 function resetCounts(){
   S.cA=S.cB=S.cZ=0; S.occ=0; S.events=[]; S.bins=[]; S.elapsed=0;
+  S.snaps=[]; S.lastSig=null; S.snapGeo=null; S.sceneStreak=0;
   S.tracks.forEach(t=>{t.inZone=false;});
 }
 function summaryLine(){
@@ -767,21 +891,40 @@ function buildCSV(){
             (b.gate/(S.binWidth/60)).toFixed(2),lat,lon].join(','));
   });
   L.push('');
-  L.push('event_time_iso,seconds_from_start,event,track_id,direction,x_norm,y_norm,camera_lat,camera_lon,camera_bearing_deg');
+  L.push('snapshot_id,file,time_iso,seconds_from_start,reason,lat,lon,gps_accuracy_m,bearing_deg,zoom,width_px,height_px');
+  S.snaps.forEach(s=>{
+    L.push([s.id, s.name, new Date(s.t).toISOString(), ((s.t-S.t0)/1000).toFixed(2),
+            s.reason, s.lat!=null?s.lat.toFixed(7):'', s.lon!=null?s.lon.toFixed(7):'',
+            s.acc!=null?Math.round(s.acc):'', s.heading!=null?s.heading.toFixed(1):'',
+            s.zoom.toFixed(2), s.w, s.h].join(','));
+  });
+  L.push('');
+  L.push('event_time_iso,seconds_from_start,event,track_id,direction,x_norm,y_norm,camera_lat,camera_lon,camera_bearing_deg,snapshot_id');
   S.events.forEach(e=>{
     L.push([new Date(e.t).toISOString(),((e.t-S.t0)/1000).toFixed(2),
-            e.kind,e.id,e.dir,e.x,e.y,lat,lon,
-            (S.heading!=null?S.heading.toFixed(1):'')].join(','));
+            e.kind,e.id,e.dir,e.x,e.y,
+            e.lat!=null?e.lat.toFixed(7):lat,
+            e.lon!=null?e.lon.toFixed(7):lon,
+            (S.heading!=null?S.heading.toFixed(1):''), e.snap].join(','));
   });
   return L.join('\n');
 }
-function download(){
-  const blob=new Blob([buildCSV()],{type:'text/csv'});
+function stamp(){ return new Date(S.t0).toISOString().replace(/[:.]/g,'-'); }
+function saveBlob(blob,name){
   const a=document.createElement('a');
-  a.href=URL.createObjectURL(blob);
-  a.download='pedcount_'+new Date(S.t0).toISOString().replace(/[:.]/g,'-')+'.csv';
+  a.href=URL.createObjectURL(blob); a.download=name;
   document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(()=>URL.revokeObjectURL(a.href),4000);
+  setTimeout(()=>URL.revokeObjectURL(a.href),8000);
+}
+function download(){
+  saveBlob(new Blob([buildCSV()],{type:'text/csv'}), 'pedcount_'+stamp()+'.csv');
+}
+function downloadZip(){
+  const files=[{name:'session.csv', bytes:new TextEncoder().encode(buildCSV())}];
+  S.snaps.forEach(s=>files.push({name:s.name, bytes:s.bytes}));
+  const z=makeZip(files);
+  saveBlob(new Blob([z],{type:'application/zip'}), 'pedcount_'+stamp()+'.zip');
+  say('Saved '+files.length+' files ('+Math.round(z.length/1024)+' KB).');
 }
 
 /* ---------- pointer input for gate and zone ---------- */
@@ -871,6 +1014,12 @@ $('btnGeo').onclick=async()=>{
       !S.geo);
 };
 $('btnCsv').onclick=download;
+$('btnZip').onclick=downloadZip;
+$('btnSnap').onclick=async()=>{ await snapshot('manual');
+  say('Snapshot '+S.snaps.length+' captured.'); };
+$('chkSnap').onchange=e=>{ cfg.snapOn=e.target.checked;
+  if(!cfg.snapOn){ clearInterval(S.viewTimer); S.viewTimer=null; }
+  else if(S.counting && !S.viewTimer) S.viewTimer=setInterval(watchView,2500); };
 $('btnCopy').onclick=()=>{
   navigator.clipboard.writeText(buildCSV().split('\n').filter(l=>l.startsWith('#')).join('\n'))
     .then(()=>say('Summary copied.')).catch(()=>say('Could not copy.',true));
@@ -888,6 +1037,8 @@ bindRange('rConf','vConf','conf',v=>(+v).toFixed(2));
 bindRange('rMinH','vMinH','minH',v=>v+'%');
 bindRange('rHits','vHits','hits',v=>v);
 bindRange('rMiss','vMiss','miss',v=>v);
+bindRange('rDist','vDist','snapDist',v=>v+' m');
+bindRange('rScene','vScene','snapScene',v=>v);
 $('selSize').onchange=e=>{cfg.size=+e.target.value;};
 $('selModel').onchange=e=>loadEngine(e.target.value);
 $('fileModel').onchange=async e=>{
