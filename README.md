@@ -6,8 +6,6 @@ Everything runs locally in the browser. No video is uploaded, recorded, or sent 
 
 **Live app:** https://asevtsuk.github.io/pdestrian-counter-for-phone/ 
 
-## Requirements
-
 - A phone or laptop with a camera and a reasonably current browser (iOS Safari 15+, Chrome, Firefox, Edge)
 - An internet connection on first load, to fetch the detection model (~5 MB, cached afterwards)
 - The page must be served over **HTTPS**. Browsers refuse camera access otherwise, which is why opening the file directly from disk will not work
@@ -24,7 +22,7 @@ To host your own copy: put `index.html` on any HTTPS host. GitHub Pages, Netlify
 2. **Adjust the gate.** A vertical gate down the middle of the view is there by default — drag either endpoint to move it, or tap *Gate* and tap two new points to redraw it. People are counted crossing it in both directions, recorded separately as `L2R` (left to right on screen) and `R2L`.
 3. **Or draw a zone.** Tap *Zone*, tap three or more corners, then tap *Close zone*. People are counted once on entry; live occupancy is shown next to the entry total.
 4. **Set the period** under *Counting period* — 1 to 60 minutes, or open ended. The count stops itself when the period expires.
-5. **Start count.** Leave the phone alone until it finishes.
+5. **Start.** The button sits top-left over the camera view with the countdown beside it. Starting takes a GPS fix and a compass bearing automatically; if the fix fails, the reason appears in a banner across the top of the screen and counting carries on regardless, with the coordinate columns left blank.
 6. **Zoom** with the −/+ controls at the top right if pedestrians are small in frame. This is a centre crop, and the crop is what the detector sees, so zooming genuinely increases the pixel height of each person in the model input rather than just magnifying the display.
 7. **Download CSV** when done.
 
