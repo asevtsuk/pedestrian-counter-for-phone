@@ -187,6 +187,15 @@
   <details>
     <summary>Detection</summary>
     <div class="body">
+      <label class="f"><span>Model</span>
+        <select id="selModel">
+          <option value="yolo" selected>YOLOv8n — accurate</option>
+          <option value="ssd">COCO-SSD — fast, less accurate</option>
+        </select>
+      </label>
+      <label class="f"><span>Backend</span><b class="val" id="vBackend">—</b></label>
+      <label class="f"><span>Your own ONNX export</span>
+        <input type="file" id="fileModel" accept=".onnx" style="max-width:150px;font-size:11px"></label>
       <label class="f"><span>Confidence</span>
         <input type="range" id="rConf" min="0.15" max="0.85" step="0.05" value="0.45">
         <b class="val" id="vConf">0.45</b></label>
@@ -215,6 +224,7 @@
   <p class="hint">Validate before you trust it: hand-count two minutes of the same view and compare. Accuracy falls off with distance, groups walking abreast, and low light.</p>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/ort.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
 <script>
@@ -289,6 +299,7 @@ const S = {
   binWidth:60, periodMin:15,
   fpsEMA:0, lastDet:0,
   geo:null, geoErr:null, heading:null,
+  engine:'yolo', backend:null,
   wakeLock:null
 };
 
@@ -406,28 +417,110 @@ function bin(now, isZone){
   if(isZone) S.bins[i].zone++; else S.bins[i].gate++;
 }
 
+/* ---------- detection engines ---------- */
+const YOLO_URL='https://huggingface.co/webml/yolov8n/resolve/main/onnx/yolov8n.onnx';
+const YIN=640, YANCH=8400;                 // fixed input size and anchor count
+const lb=document.createElement('canvas'); lb.width=YIN; lb.height=YIN;
+const lctx=lb.getContext('2d',{willReadFrequently:true});
+let inputBuf=null;
+
+async function loadYolo(src){
+  ort.env.wasm.wasmPaths='https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/';
+  ort.env.wasm.numThreads=1;               // no cross-origin isolation on Pages
+  ort.env.wasm.simd=true;
+  const eps=[];
+  if(navigator.gpu) eps.push('webgpu');
+  eps.push('wasm');
+  let last;
+  for(const ep of eps){
+    try{
+      const s=await ort.InferenceSession.create(src,{executionProviders:[ep],
+        graphOptimizationLevel:'all'});
+      S.backend=ep; return s;
+    }catch(e){ last=e; }
+  }
+  throw last;
+}
+
+function letterbox(){
+  const W=vid.videoWidth, H=vid.videoHeight;
+  const s=Math.min(YIN/W, YIN/H);
+  const nw=Math.round(W*s), nh=Math.round(H*s);
+  const dx=(YIN-nw)>>1, dy=(YIN-nh)>>1;
+  lctx.fillStyle='#727272'; lctx.fillRect(0,0,YIN,YIN);
+  lctx.drawImage(vid,0,0,W,H,dx,dy,nw,nh);
+  const px=lctx.getImageData(0,0,YIN,YIN).data;
+  if(!inputBuf) inputBuf=new Float32Array(3*YIN*YIN);
+  const plane=YIN*YIN;
+  for(let i=0,p=0;i<plane;i++,p+=4){
+    inputBuf[i]         = px[p]  /255;     // R
+    inputBuf[i+plane]   = px[p+1]/255;     // G
+    inputBuf[i+2*plane] = px[p+2]/255;     // B
+  }
+  return {s,dx,dy,W,H};
+}
+
+function nms(b,thr){
+  b.sort((p,q)=>q.score-p.score);
+  const keep=[];
+  while(b.length){
+    const m=b.shift(); keep.push(m);
+    b=b.filter(z=>{
+      const xx1=Math.max(m.x,z.x), yy1=Math.max(m.y,z.y);
+      const xx2=Math.min(m.x+m.w,z.x+z.w), yy2=Math.min(m.y+m.h,z.y+z.h);
+      const it=Math.max(0,xx2-xx1)*Math.max(0,yy2-yy1);
+      return it/(m.w*m.h+z.w*z.h-it+1e-9) < thr;
+    });
+    if(keep.length>60) break;
+  }
+  return keep;
+}
+
+async function detectYolo(){
+  const g=letterbox();
+  const t=new ort.Tensor('float32',inputBuf,[1,3,YIN,YIN]);
+  const out=await S.model.run({images:t});
+  const o=out[Object.keys(out)[0]].data;    // (1,84,8400) flattened
+  const cand=[];
+  for(let i=0;i<YANCH;i++){
+    const sc=o[4*YANCH+i];                  // class 0 = person
+    if(sc<cfg.conf) continue;
+    const cx=o[i], cy=o[YANCH+i], w=o[2*YANCH+i], h=o[3*YANCH+i];
+    // undo letterbox, then normalise to the source frame
+    const x=(cx-w/2-g.dx)/g.s/g.W, y=(cy-h/2-g.dy)/g.s/g.H;
+    cand.push({x, y, w:w/g.s/g.W, h:h/g.s/g.H, score:sc});
+  }
+  return nms(cand,0.45);
+}
+
+async function detectSsd(){
+  const w=cfg.size, h=Math.round(w*vid.videoHeight/vid.videoWidth);
+  if(buf.width!==w||buf.height!==h){buf.width=w;buf.height=h;}
+  bctx.drawImage(vid,0,0,w,h);
+  const raw=await S.model.detect(buf, 25, cfg.conf);
+  return raw.filter(d=>d.class==='person')
+            .map(d=>({x:d.bbox[0]/w, y:d.bbox[1]/h, w:d.bbox[2]/w, h:d.bbox[3]/h}));
+}
+
 /* ---------- detection loop ---------- */
+let busy=false;
 async function detectLoop(){
   if(!S.running) return;
-  if(S.model && vid.videoWidth){
-    const w=cfg.size, h=Math.round(w*vid.videoHeight/vid.videoWidth);
-    if(buf.width!==w||buf.height!==h){buf.width=w;buf.height=h;}
-    bctx.drawImage(vid,0,0,w,h);
-    let raw=[];
-    try{ raw = await S.model.detect(buf, 25, cfg.conf); }
-    catch(e){ /* transient */ }
-
-    const dets = raw.filter(d=>d.class==='person' && d.bbox[3]/h >= cfg.minH)
-                    .map(d=>({x:d.bbox[0]/w, y:d.bbox[1]/h, w:d.bbox[2]/w, h:d.bbox[3]/h}));
-    track(dets);
-    tally();
-
-    const now=performance.now();
-    if(S.lastDet){
-      const f=1000/Math.max(1,now-S.lastDet);
-      S.fpsEMA = S.fpsEMA ? 0.85*S.fpsEMA+0.15*f : f;
-    }
-    S.lastDet=now;
+  if(S.model && vid.videoWidth && !busy){
+    busy=true;
+    try{
+      let dets = S.engine==='yolo' ? await detectYolo() : await detectSsd();
+      dets = dets.filter(d=>d.h >= cfg.minH);
+      track(dets);
+      tally();
+      const now=performance.now();
+      if(S.lastDet){
+        const f=1000/Math.max(1,now-S.lastDet);
+        S.fpsEMA = S.fpsEMA ? 0.85*S.fpsEMA+0.15*f : f;
+      }
+      S.lastDet=now;
+    }catch(e){ /* transient frame failure */ }
+    busy=false;
   }
   requestAnimationFrame(detectLoop);
 }
@@ -555,17 +648,31 @@ function fixLocation(){
 async function fixHeading(){
   try{
     if(typeof DeviceOrientationEvent==='undefined') return;
+    // iOS gates the motion sensors behind an explicit grant; Android does not
     if(typeof DeviceOrientationEvent.requestPermission==='function'){
       if(await DeviceOrientationEvent.requestPermission() !== 'granted') return;
     }
     const h=await new Promise(res=>{
-      const on=e=>{
-        let v = (typeof e.webkitCompassHeading==='number') ? e.webkitCompassHeading
-              : (e.absolute && e.alpha!=null) ? (360-e.alpha)%360 : null;
-        if(v!=null){ window.removeEventListener('deviceorientation',on); res(v); }
+      const off=()=>{
+        window.removeEventListener('deviceorientationabsolute',on);
+        window.removeEventListener('deviceorientation',on);
       };
+      const on=e=>{
+        let v=null;
+        if(typeof e.webkitCompassHeading==='number'){
+          v=e.webkitCompassHeading;                 // Safari, already true north
+        }else if(e.alpha!=null && (e.absolute || e.type==='deviceorientationabsolute')){
+          v=(360-e.alpha)%360;                      // Chrome, magnetic north
+        }
+        if(v!=null){
+          // alpha is reported against the device's natural orientation
+          const rot=(screen.orientation&&screen.orientation.angle)||0;
+          off(); res((v+rot)%360);
+        }
+      };
+      window.addEventListener('deviceorientationabsolute',on);
       window.addEventListener('deviceorientation',on);
-      setTimeout(()=>{window.removeEventListener('deviceorientation',on); res(null);},4000);
+      setTimeout(()=>{off(); res(null);},4000);
     });
     if(h!=null) S.heading=h;
   }catch(e){ /* bearing is optional */ }
@@ -757,6 +864,14 @@ bindRange('rMinH','vMinH','minH',v=>v+'%');
 bindRange('rHits','vHits','hits',v=>v);
 bindRange('rMiss','vMiss','miss',v=>v);
 $('selSize').onchange=e=>{cfg.size=+e.target.value;};
+$('selModel').onchange=e=>loadEngine(e.target.value);
+$('fileModel').onchange=async e=>{
+  const f=e.target.files&&e.target.files[0];
+  if(!f) return;
+  const bytes=new Uint8Array(await f.arrayBuffer());
+  $('selModel').value='yolo';
+  loadEngine('yolo', bytes);
+};
 $('chkDraw').onchange=e=>{cfg.draw=e.target.checked;};
 
 /* ---------- lifecycle ---------- */
@@ -767,21 +882,35 @@ document.addEventListener('visibilitychange',()=>{
   if(document.visibilityState==='visible' && S.counting) lockScreen();
 });
 
+async function loadEngine(which, src){
+  S.model=null; S.backend=null; ready();
+  $('vBackend').textContent='loading…';
+  try{
+    if(which==='yolo'){
+      if(typeof ort==='undefined') throw new Error('ONNX Runtime script did not load');
+      say('Downloading YOLOv8n (13 MB) — first load only, then it is cached…');
+      S.model=await loadYolo(src||YOLO_URL);
+      S.engine='yolo';
+      $('vBackend').textContent=S.backend;
+      say('YOLOv8n ready on '+S.backend+'. '+(S.running?'Draw a gate or a zone.':'Turn on the camera.'));
+    }else{
+      if(typeof cocoSsd==='undefined') throw new Error('TensorFlow.js script did not load');
+      S.model=await cocoSsd.load({base:'lite_mobilenet_v2'});
+      S.engine='ssd'; S.backend='tfjs-webgl';
+      $('vBackend').textContent=S.backend;
+      say('COCO-SSD ready. '+(S.running?'Draw a gate or a zone.':'Turn on the camera.'));
+    }
+    S.fpsEMA=0; ready();
+  }catch(e){
+    $('vBackend').textContent='failed';
+    banner('Model load failed: '+(e.message||e));
+    say('Could not load that model. Try the other one in Detection settings.',true);
+  }
+}
+
 (async function boot(){
   draw(); tickUI();
-  if(typeof tf==='undefined' || typeof cocoSsd==='undefined'){
-    banner('The TensorFlow.js scripts did not load. Check the network connection, or any content blocker that might be blocking cdn.jsdelivr.net, then reload.');
-    say('Detection library unavailable — the camera will still open, but nothing will be counted.',true);
-    return;
-  }
-  try{
-    S.model = await cocoSsd.load({base:'lite_mobilenet_v2'});
-    say(S.running ? 'Model ready. Draw a gate or a zone.' : 'Model ready. Turn on the camera.');
-    ready();
-  }catch(e){
-    banner('The detection model failed to download: '+(e.message||e));
-    say('Model download failed. Check the connection and reload.',true);
-  }
+  loadEngine('yolo');
 })();
 </script>
 </body>
