@@ -21,11 +21,12 @@ To host your own copy: put `index.html` on any HTTPS host. GitHub Pages, Netlify
 ## Using it
 
 1. **Turn on camera.** Mount or brace the phone so it will not move. Any camera motion registers as pedestrian motion and inflates the count.
-2. **Draw a gate.** Tap *Gate*, then tap each end of the line. Drag the endpoints to adjust. *Flip* swaps which direction is recorded as `→`.
+2. **Adjust the gate.** A vertical gate down the middle of the view is there by default — drag either endpoint to move it, or tap *Gate* and tap two new points to redraw it. People are counted crossing it in both directions, recorded separately as `L2R` (left to right on screen) and `R2L`.
 3. **Or draw a zone.** Tap *Zone*, tap three or more corners, then tap *Close zone*. People are counted once on entry; live occupancy is shown next to the entry total.
 4. **Set the period** under *Counting period* — 1 to 60 minutes, or open ended. The count stops itself when the period expires.
 5. **Start count.** Leave the phone alone until it finishes.
-6. **Download CSV** when done.
+6. **Zoom** with the −/+ controls at the top right if pedestrians are small in frame. This is a centre crop, and the crop is what the detector sees, so zooming genuinely increases the pixel height of each person in the model input rather than just magnifying the display.
+7. **Download CSV** when done.
 
 You can use a gate and a zone at the same time. They are counted independently.
 
@@ -39,7 +40,7 @@ Detections are linked across frames by a lightweight tracker: boxes are advanced
 
 Each track is located by the **midpoint of the bottom edge of its box** — approximately where the person's feet meet the ground. This is the point that crosses the gate and enters the zone. Using the box centroid instead would place people some distance above the ground plane and would systematically shift crossing times.
 
-- **Gate crossings** are detected by testing whether the segment from the track's previous foot position to its current one intersects the gate segment. Both endpoints are bounded, so someone walking along the gate's extension beyond its drawn ends is not counted. Direction comes from the sign of the cross product of the gate vector and the movement vector.
+- **Gate crossings** are detected by testing whether the segment from the track's previous foot position to its current one intersects the gate segment. Both endpoints are bounded, so someone walking along the gate's extension beyond its drawn ends is not counted. Direction is taken from the sign of horizontal movement across the screen — rightward is `L2R`, leftward is `R2L` — so the labels mean the same thing regardless of how the gate is angled. For a purely vertical walk across an angled gate, the gate normal is used instead.
 - **Zone entries** are detected by a ray-casting point-in-polygon test, incremented on the transition from outside to inside. Exits are logged but not counted.
 
 A track must survive a minimum number of consecutive frames before it is eligible to be counted, which suppresses single-frame false positives.
