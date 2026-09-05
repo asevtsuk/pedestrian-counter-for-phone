@@ -127,6 +127,7 @@
     <div class="sub">
       <div id="phase">Ready</div>
       <div id="fps">—</div>
+      <div id="geo">No location fix</div>
     </div>
   </div>
 
@@ -145,6 +146,9 @@
 
   <div class="row">
     <button id="btnRun" class="go" disabled>Start count</button>
+  </div>
+  <div class="row">
+    <button id="btnGeo">Fix location</button>
     <button id="btnReset">Reset</button>
   </div>
   <div class="row">
@@ -284,6 +288,7 @@ const S = {
   t0:0, tEnd:0, elapsed:0,
   binWidth:60, periodMin:15,
   fpsEMA:0, lastDet:0,
+  geo:null, geoErr:null, heading:null,
   wakeLock:null
 };
 
@@ -510,6 +515,7 @@ function tickUI(){
   $('rMin').textContent=per.toFixed(1);
   $('rHr').textContent=Math.round(per*60);
   $('fps').textContent = S.running ? S.fpsEMA.toFixed(1)+' fps · '+S.tracks.length+' tracked' : '—';
+  $('geo').textContent = geoText();
   if(S.zoneClosed) $('cZ').parentElement.querySelector('.k').textContent='Zone entries · '+S.occ+' inside';
   drawSpark();
   requestAnimationFrame(tickUI);
@@ -530,6 +536,46 @@ function drawSpark(){
   g.fillText(S.bins.length?unit+' · peak '+max:'Gate crossings over time', pad, 13);
 }
 
+/* ---------- camera position: GPS fix and compass bearing ---------- */
+function fixLocation(){
+  return new Promise(res=>{
+    if(!navigator.geolocation){ S.geoErr='no geolocation API'; return res(); }
+    navigator.geolocation.getCurrentPosition(p=>{
+      S.geo={lat:p.coords.latitude, lon:p.coords.longitude,
+             acc:p.coords.accuracy, alt:p.coords.altitude, t:p.timestamp};
+      S.geoErr=null; res();
+    }, e=>{
+      S.geoErr = e.code===1 ? 'permission denied'
+               : e.code===2 ? 'position unavailable'
+               : e.code===3 ? 'timed out' : (e.message||'failed');
+      res();
+    }, {enableHighAccuracy:true, timeout:20000, maximumAge:0});
+  });
+}
+async function fixHeading(){
+  try{
+    if(typeof DeviceOrientationEvent==='undefined') return;
+    if(typeof DeviceOrientationEvent.requestPermission==='function'){
+      if(await DeviceOrientationEvent.requestPermission() !== 'granted') return;
+    }
+    const h=await new Promise(res=>{
+      const on=e=>{
+        let v = (typeof e.webkitCompassHeading==='number') ? e.webkitCompassHeading
+              : (e.absolute && e.alpha!=null) ? (360-e.alpha)%360 : null;
+        if(v!=null){ window.removeEventListener('deviceorientation',on); res(v); }
+      };
+      window.addEventListener('deviceorientation',on);
+      setTimeout(()=>{window.removeEventListener('deviceorientation',on); res(null);},4000);
+    });
+    if(h!=null) S.heading=h;
+  }catch(e){ /* bearing is optional */ }
+}
+function geoText(){
+  if(S.geo) return S.geo.lat.toFixed(5)+', '+S.geo.lon.toFixed(5)+
+    ' ±'+Math.round(S.geo.acc)+'m'+(S.heading!=null?' · '+Math.round(S.heading)+'°':'');
+  return S.geoErr ? 'Location: '+S.geoErr : 'No location fix';
+}
+
 /* ---------- session control ---------- */
 function startCount(){
   if(!S.gate && !S.zoneClosed){ say('Draw a gate line or close a zone first.',true); return; }
@@ -542,6 +588,7 @@ function startCount(){
   $('btnCsv').disabled=false; $('btnCopy').disabled=false;
   say('Counting. Keep the phone still — any camera movement will register as pedestrian movement.');
   lockScreen();
+  fixLocation(); fixHeading();   // recorded against this session, not awaited
 }
 function stopCount(why){
   S.counting=false; S.elapsed=(Date.now()-S.t0)/1000;
@@ -567,10 +614,18 @@ function say(t,err){ msg.textContent=t; msg.className=err?'err':''; }
 /* ---------- export ---------- */
 function buildCSV(){
   const m=S.elapsed/60, per=m>0?(S.cA+S.cB)/m:0, zper=m>0?S.cZ/m:0;
+  const lat = S.geo ? S.geo.lat.toFixed(7) : '';
+  const lon = S.geo ? S.geo.lon.toFixed(7) : '';
   const L=[];
   L.push('# Pedestrian count session');
   L.push('# started,'+new Date(S.t0).toISOString());
   L.push('# duration_minutes,'+m.toFixed(3));
+  L.push('# camera_lat,'+lat);
+  L.push('# camera_lon,'+lon);
+  L.push('# camera_gps_accuracy_m,'+(S.geo?Math.round(S.geo.acc):''));
+  L.push('# camera_altitude_m,'+(S.geo&&S.geo.alt!=null?S.geo.alt.toFixed(1):''));
+  L.push('# camera_bearing_deg,'+(S.heading!=null?S.heading.toFixed(1):''));
+  L.push('# location_status,'+(S.geo?'fix acquired':(S.geoErr||'not attempted')));
   L.push('# gate_dir_A,'+S.cA);
   L.push('# gate_dir_B,'+S.cB);
   L.push('# gate_total,'+(S.cA+S.cB));
@@ -581,16 +636,17 @@ function buildCSV(){
   L.push('# zone_entries_per_hour_extrapolated,'+Math.round(zper*60));
   L.push('# confidence,'+cfg.conf+',min_height_frac,'+cfg.minH+',min_hits,'+cfg.hits);
   L.push('');
-  L.push('bin_start_s,bin_end_s,gate_crossings,zone_entries,gate_per_minute');
+  L.push('bin_start_s,bin_end_s,gate_crossings,zone_entries,gate_per_minute,camera_lat,camera_lon');
   S.bins.forEach((b,i)=>{
     L.push([i*S.binWidth,(i+1)*S.binWidth,b.gate,b.zone,
-            (b.gate/(S.binWidth/60)).toFixed(2)].join(','));
+            (b.gate/(S.binWidth/60)).toFixed(2),lat,lon].join(','));
   });
   L.push('');
-  L.push('event_time_iso,seconds_from_start,event,track_id,direction,x_norm,y_norm');
+  L.push('event_time_iso,seconds_from_start,event,track_id,direction,x_norm,y_norm,camera_lat,camera_lon,camera_bearing_deg');
   S.events.forEach(e=>{
     L.push([new Date(e.t).toISOString(),((e.t-S.t0)/1000).toFixed(2),
-            e.kind,e.id,e.dir,e.x,e.y].join(','));
+            e.kind,e.id,e.dir,e.x,e.y,lat,lon,
+            (S.heading!=null?S.heading.toFixed(1):'')].join(','));
   });
   return L.join('\n');
 }
@@ -676,6 +732,13 @@ $('btnReset').onclick=()=>{ S.counting=false; resetCounts();
   $('clock').textContent = mmss((+$('selPeriod').value)*60);
   $('phase').textContent='Ready'; $('btnRun').textContent='Start count';
   $('btnRun').className='go'; say('Counts cleared.'); };
+$('btnGeo').onclick=async()=>{
+  say('Getting a GPS fix…');
+  await Promise.all([fixLocation(), fixHeading()]);
+  say(S.geo ? 'Location fixed: '+geoText()
+            : 'No location: '+(S.geoErr||'unavailable')+'. Counts will export without coordinates.',
+      !S.geo);
+};
 $('btnCsv').onclick=download;
 $('btnCopy').onclick=()=>{
   navigator.clipboard.writeText(buildCSV().split('\n').filter(l=>l.startsWith('#')).join('\n'))
