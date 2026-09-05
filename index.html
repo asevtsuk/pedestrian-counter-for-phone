@@ -202,6 +202,28 @@
   </details>
 
   <details>
+    <summary>Power</summary>
+    <div class="body">
+      <label class="f"><span>Detection rate</span>
+        <select id="selFps">
+          <option value="3">3 per second — longest battery</option>
+          <option value="6" selected>6 per second — recommended</option>
+          <option value="10">10 per second</option>
+          <option value="0">Uncapped — heaviest</option>
+        </select>
+      </label>
+      <label class="f"><span>Camera preview</span>
+        <select id="selPreview">
+          <option value="on" selected>Normal</option>
+          <option value="dim">Dimmed</option>
+          <option value="off">Hidden — tracks only</option>
+        </select>
+      </label>
+      <p class="hint">Detection rate is the main draw on the battery. Six per second is ample for walking pace, and roughly a third of the work of running uncapped. Once a precise fix is in, GPS drops to low power by itself. On an OLED screen, dimming or hiding the preview saves further — the counting is unaffected either way, since the detector reads the camera directly rather than the display.</p>
+    </div>
+  </details>
+
+  <details>
     <summary>Snapshots</summary>
     <div class="body">
       <label class="f"><span>Capture reference photos</span>
@@ -337,12 +359,14 @@ const S = {
   fpsEMA:0, lastDet:0,
   geo:null, geoErr:null, heading:null, geoWatch:null,
   snaps:[], lastSig:null, snapGeo:null, sceneStreak:0, viewTimer:null,
+  dirty:true, binsDrawn:-1, lowPower:false,
   engine:'yolo', backend:null,
   wakeLock:null
 };
 
 const cfg = {conf:0.45, minH:0.06, hits:3, miss:12, size:384, draw:true,
-             snapDist:10, snapScene:22, snapOn:true};
+             snapDist:10, snapScene:22, snapOn:true,
+             fpsCap:6, preview:'on'};
 
 /* ---------- offscreen buffer fed to the detector ---------- */
 const buf = document.createElement('canvas');
@@ -558,7 +582,9 @@ async function detectSsd(){
 let busy=false;
 async function detectLoop(){
   if(!S.running) return;
-  if(S.model && vid.videoWidth && !busy){
+  const gap = cfg.fpsCap ? 1000/cfg.fpsCap : 0;
+  const due = !S.lastDet || (performance.now()-S.lastDet) >= gap;
+  if(S.model && vid.videoWidth && !busy && due){
     busy=true;
     try{
       let dets = S.engine==='yolo' ? await detectYolo() : await detectSsd();
@@ -570,7 +596,7 @@ async function detectLoop(){
         const f=1000/Math.max(1,now-S.lastDet);
         S.fpsEMA = S.fpsEMA ? 0.85*S.fpsEMA+0.15*f : f;
       }
-      S.lastDet=now;
+      S.lastDet=now; S.dirty=true;
     }catch(e){ /* transient frame failure */ }
     busy=false;
   }
@@ -587,6 +613,8 @@ function fit(){
   octx.setTransform(dpr,0,0,dpr,0,0);
 }
 function draw(){
+  if(!S.dirty){ requestAnimationFrame(draw); return; }
+  S.dirty=false;
   const W=ov.width/(Math.min(2,window.devicePixelRatio||1));
   const H=ov.height/(Math.min(2,window.devicePixelRatio||1));
   octx.clearRect(0,0,W,H);
@@ -651,8 +679,7 @@ function tickUI(){
   $('geo').textContent = geoText();
   $('vSnaps').textContent = S.snaps.length;
   if(S.zoneClosed) $('cZ').parentElement.querySelector('.k').textContent='Zone entries · '+S.occ+' inside';
-  drawSpark();
-  requestAnimationFrame(tickUI);
+  if(S.binsDrawn!==S.bins.length){ S.binsDrawn=S.bins.length; drawSpark(); }
 }
 function drawSpark(){
   const c=$('spark'), g=c.getContext('2d');
@@ -819,7 +846,9 @@ async function snapshot(reason){
 /* checked every couple of seconds while counting */
 async function watchView(){
   if(!S.counting || !S.running || !vid.videoWidth) return;
-  if(S.snapGeo && S.geo && metres(S.snapGeo,S.geo) > cfg.snapDist){
+  // require real displacement, not noise: the threshold or the fix's own error, whichever is larger
+  const need=Math.max(cfg.snapDist, S.geo?S.geo.acc:0);
+  if(S.snapGeo && S.geo && metres(S.snapGeo,S.geo) > need){
     await snapshot('moved_'+Math.round(metres(S.snapGeo,S.geo))+'m'); return;
   }
   const d=sigDiff(S.lastSig, sceneSig());
@@ -855,6 +884,14 @@ function startCount(){
         if(late){ banner(null);
           say('GPS fix acquired: '+S.geo.lat.toFixed(5)+', '+S.geo.lon.toFixed(5)+
               ' (±'+Math.round(S.geo.acc)+' m). Earlier rows have been filled in.'); }
+        // a tripod does not move: once the fix is good, stop running the receiver hard
+        if(!S.lowPower && p.coords.accuracy<=25){
+          S.lowPower=true;
+          navigator.geolocation.clearWatch(S.geoWatch);
+          S.geoWatch=navigator.geolocation.watchPosition(
+            q=>{ setGeo(q.coords,q.timestamp,false); backfillGeo(); },
+            ()=>{}, {enableHighAccuracy:false, maximumAge:30000, timeout:60000});
+        }
       },
       ()=>{}, {enableHighAccuracy:true, maximumAge:5000, timeout:30000});
   }
@@ -890,6 +927,7 @@ function stopCount(why){
       (S.snaps.length?' '+S.snaps.length+' snapshot'+(S.snaps.length>1?'s':'')+' captured.':''));
   clearInterval(S.viewTimer); S.viewTimer=null;
   if(S.geoWatch!=null){ navigator.geolocation.clearWatch(S.geoWatch); S.geoWatch=null; }
+  S.lowPower=false;
   if(S.wakeLock){S.wakeLock.release().catch(()=>{}); S.wakeLock=null;}
 }
 function resetCounts(){
@@ -981,7 +1019,7 @@ function ptFromEvent(e){
 }
 let drag=null;
 ov.addEventListener('pointerdown',e=>{
-  e.preventDefault();
+  e.preventDefault(); S.dirty=true;
   const p=ptFromEvent(e);
   // grab an existing handle first
   const near=(q)=>Math.hypot(q.x-p.x,q.y-p.y)<0.05;
@@ -1005,7 +1043,7 @@ ov.addEventListener('pointerdown',e=>{
 },{passive:false});
 ov.addEventListener('pointermove',e=>{
   if(!drag) return;
-  e.preventDefault();
+  e.preventDefault(); S.dirty=true;
   const p=ptFromEvent(e);
   if(drag.kind==='gateA') S.gate.a=p;
   else if(drag.kind==='gateB'||drag.kind==='newGate') S.gate.b=p;
@@ -1075,6 +1113,13 @@ bindRange('rMiss','vMiss','miss',v=>v);
 bindRange('rDist','vDist','snapDist',v=>v+' m');
 bindRange('rScene','vScene','snapScene',v=>v);
 $('selSize').onchange=e=>{cfg.size=+e.target.value;};
+$('selFps').onchange=e=>{cfg.fpsCap=+e.target.value;};
+$('selPreview').onchange=e=>{
+  cfg.preview=e.target.value;
+  vid.style.filter = cfg.preview==='dim' ? 'brightness(0.3)' : 'none';
+  vid.style.opacity = cfg.preview==='off' ? '0' : '1';
+  S.dirty=true;
+};
 $('selModel').onchange=e=>loadEngine(e.target.value);
 $('fileModel').onchange=async e=>{
   const f=e.target.files&&e.target.files[0];
@@ -1120,7 +1165,7 @@ async function loadEngine(which, src){
 }
 
 (async function boot(){
-  draw(); tickUI();
+  draw(); tickUI(); setInterval(tickUI, 250);
   loadEngine('yolo');
 })();
 </script>
