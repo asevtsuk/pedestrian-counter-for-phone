@@ -166,13 +166,11 @@
   <canvas id="spark" width="600" height="92"></canvas>
 
   <div class="row">
-    <button id="btnGeo">Fix location</button>
     <button id="btnReset">Reset counts</button>
   </div>
   <div class="row">
     <button id="btnZip" disabled>Download ZIP</button>
     <button id="btnCsv" disabled>CSV only</button>
-    <button id="btnCopy" disabled>Copy</button>
   </div>
 
   <div id="msg">Loading the detection model…</div>
@@ -274,8 +272,10 @@ const msg=$('msg');
 /* ---------- make failures visible instead of silent ---------- */
 function banner(t){
   const b=$('banner');
-  b.textContent=t; b.style.display='block';
+  if(!t){ b.style.display='none'; return; }
+  b.textContent=t+'   (tap to dismiss)'; b.style.display='block';
 }
+document.getElementById('banner').addEventListener('click',()=>banner(null));
 window.addEventListener('error', e=>{
   banner('Script error: '+(e.message||'unknown')+
          (e.filename?' — '+e.filename.split('/').pop()+':'+e.lineno:''));
@@ -820,11 +820,26 @@ function startCount(){
   S.t0=Date.now(); S.counting=true;
   $('btnRun').textContent='Stop'; $('btnRun').className='stop';
   $('phase').textContent='Counting';
-  $('btnCsv').disabled=false; $('btnCopy').disabled=false; $('btnZip').disabled=false;
+  $('btnCsv').disabled=false; $('btnZip').disabled=false;
   say('Counting. Keep the phone still — any camera movement will register as pedestrian movement.');
   lockScreen();
+  S.geo=null; S.geoErr=null; banner(null);
+  $('geo').textContent='Locating…';
   fixHeading();
-  fixLocation().then(()=>{ if(cfg.snapOn) snapshot('session_start'); });
+  fixLocation().then(()=>{
+    if(S.geo){
+      say('Counting at '+S.geo.lat.toFixed(5)+', '+S.geo.lon.toFixed(5)+
+          ' (±'+Math.round(S.geo.acc)+' m). Keep the phone still.');
+    }else{
+      say('Counting, but there is no GPS fix: '+(S.geoErr||'unavailable')+
+          '. The count is unaffected; coordinate columns will be blank. '+
+          (S.geoErr==='permission denied'
+            ? 'Allow location under Settings → Safari → Location, then restart the count.'
+            : 'Move into clearer sky and restart the count if you need coordinates.'), true);
+      banner('No GPS fix: '+(S.geoErr||'unavailable')+'. Counting continues; coordinates will be blank.');
+    }
+    if(cfg.snapOn) snapshot('session_start');
+  });
   if(navigator.geolocation && !S.geoWatch){
     S.geoWatch=navigator.geolocation.watchPosition(
       p=>{ S.geo={lat:p.coords.latitude, lon:p.coords.longitude,
@@ -1006,13 +1021,6 @@ $('btnReset').onclick=()=>{ S.counting=false; resetCounts();
   $('clock').textContent = mmss((+$('selPeriod').value)*60);
   $('phase').textContent='Ready'; $('btnRun').textContent='Start';
   $('btnRun').className='go'; say('Counts cleared.'); };
-$('btnGeo').onclick=async()=>{
-  say('Getting a GPS fix…');
-  await Promise.all([fixLocation(), fixHeading()]);
-  say(S.geo ? 'Location fixed: '+geoText()
-            : 'No location: '+(S.geoErr||'unavailable')+'. Counts will export without coordinates.',
-      !S.geo);
-};
 $('btnCsv').onclick=download;
 $('btnZip').onclick=downloadZip;
 $('btnSnap').onclick=async()=>{ await snapshot('manual');
@@ -1020,10 +1028,6 @@ $('btnSnap').onclick=async()=>{ await snapshot('manual');
 $('chkSnap').onchange=e=>{ cfg.snapOn=e.target.checked;
   if(!cfg.snapOn){ clearInterval(S.viewTimer); S.viewTimer=null; }
   else if(S.counting && !S.viewTimer) S.viewTimer=setInterval(watchView,2500); };
-$('btnCopy').onclick=()=>{
-  navigator.clipboard.writeText(buildCSV().split('\n').filter(l=>l.startsWith('#')).join('\n'))
-    .then(()=>say('Summary copied.')).catch(()=>say('Could not copy.',true));
-};
 $('selPeriod').onchange=e=>{ S.periodMin=+e.target.value;
   if(!S.counting){ const t=S.periodMin?mmss(S.periodMin*60):'00:00';
     $('clock').textContent=t; $('miniClock').textContent=t; } };
