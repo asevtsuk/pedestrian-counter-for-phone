@@ -6,6 +6,8 @@ Everything runs locally in the browser. No video is uploaded, recorded, or sent 
 
 **Live app:** https://asevtsuk.github.io/pdestrian-counter-for-phone/ 
 
+## Requirements
+
 - A phone or laptop with a camera and a reasonably current browser (iOS Safari 15+, Chrome, Firefox, Edge)
 - An internet connection on first load, to fetch the detection model (~5 MB, cached afterwards)
 - The page must be served over **HTTPS**. Browsers refuse camera access otherwise, which is why opening the file directly from disk will not work
@@ -22,7 +24,13 @@ To host your own copy: put `index.html` on any HTTPS host. GitHub Pages, Netlify
 2. **Adjust the gate.** A vertical gate down the middle of the view is there by default — drag either endpoint to move it, or tap *Gate* and tap two new points to redraw it. People are counted crossing it in both directions, recorded separately as `L2R` (left to right on screen) and `R2L`.
 3. **Or draw a zone.** Tap *Zone*, tap three or more corners, then tap *Close zone*. People are counted once on entry; live occupancy is shown next to the entry total.
 4. **Set the period** under *Counting period* — 1 to 60 minutes, or open ended. The count stops itself when the period expires.
-5. **Start.** The button sits top-left over the camera view with the countdown beside it. Starting takes a GPS fix and a compass bearing automatically; if the fix fails, the reason appears in a banner across the top of the screen and counting carries on regardless, with the coordinate columns left blank.
+5. **Start.** The button sits top-left over the camera view with the countdown beside it. Starting takes a GPS fix and a compass bearing automatically, and counting never waits on either.
+
+   A coarse network fix is requested first, because it usually returns within a second or two and settles whether location works at all while the count is still young. A precise satellite fix follows with a 60-second window and replaces it, and a position watch keeps refining for the rest of the session. Because the phone is stationary during a count, any late fix is applied retrospectively to rows already recorded, and the banner clears itself when that happens.
+
+   Warnings only interrupt during the first twenty seconds of a count. A failure discovered after that goes to the status line under the panel and is left to resolve itself in the background, so a long count is never interrupted partway through.
+
+   If nothing ever arrives, the reason appears in a banner at the top of the screen — `permission denied` means a stored refusal to clear in Safari's settings, while `timed out` or `position unavailable` means the receiver is struggling, usually indoors or in a street canyon. Counting is unaffected either way; only the coordinate columns are left blank.
 6. **Zoom** with the −/+ controls at the top right if pedestrians are small in frame. This is a centre crop, and the crop is what the detector sees, so zooming genuinely increases the pixel height of each person in the model input rather than just magnifying the display.
 7. **Download CSV** when done.
 
@@ -96,7 +104,21 @@ Two coordinate systems are recorded, and they mean different things.
 
 `camera_lat` and `camera_lon` are **WGS84** coordinates of the phone. Event rows carry the live position at the moment of that crossing; the header records the fix at session start. `camera_bearing_deg` is the compass bearing the phone was facing, from the magnetometer, where available. Every count in a session shares one camera position — the observer's location, not the pedestrian's.
 
-Accuracy is recorded in the header as `camera_gps_accuracy_m`. Phone GPS in a street canyon is commonly 10–30 m, which is coarser than the sidewalk you are counting; for anything requiring precise placement, snap the point to the surveyed segment afterwards rather than trusting the raw fix.
+Rows recorded before the first fix are filled in with that fix once it arrives, on the assumption that a tripod-mounted phone has not moved during the count. Accuracy is recorded in the header as `camera_gps_accuracy_m`, and a coarse network fix will show a much larger figure than a satellite one. Phone GPS in a street canyon is commonly 10–30 m, which is coarser than the sidewalk you are counting; for anything requiring precise placement, snap the point to the surveyed segment afterwards rather than trusting the raw fix.
+
+## Battery
+
+Continuous neural inference is the heaviest thing a phone browser can do, and a long count will warm the device and drain it noticeably. Several things reduce that.
+
+**Detection rate** is the dominant cost and the main control, under *Power*. The default caps inference at 6 per second. At walking pace that is a step of about 23 cm between frames — far finer than needed to catch a gate crossing — while an uncapped loop on a fast backend may run three or four times as often for no gain in accuracy. Drop to 3 per second for very long sessions; the step grows to about 47 cm, still comfortably below the point where the tracker starts losing people.
+
+**Camera preview** can be dimmed or hidden entirely. The detector reads the camera stream directly rather than the display, so counting is completely unaffected, and on an OLED screen a dark display draws appreciably less. Useful once a tripod is set and you no longer need to watch the framing.
+
+**GPS** manages itself. The receiver runs in high-accuracy mode only until a fix better than 25 m arrives, then drops to a low-power watch, on the reasoning that a tripod does not move. Snapshot displacement tests use the threshold or the fix's own error margin, whichever is larger, so a coarse fix cannot trigger spurious photos through noise alone.
+
+**Backend** matters too: WebGPU is markedly more efficient per inference than the WebAssembly fallback. Check which one you have under *Detection*.
+
+Beyond the app: lower screen brightness, close other tabs, and keep the phone out of direct sun. Thermal throttling will cut the detection rate on its own once the device gets hot, so shade is worth more than it sounds.
 
 ## Accuracy and limitations
 
