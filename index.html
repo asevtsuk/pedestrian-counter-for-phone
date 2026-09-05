@@ -47,9 +47,9 @@
   #startMsg{color:var(--dirB);font-size:13px;max-width:36ch;line-height:1.45;
     word-break:break-word;min-height:1em}
 
-  #banner{position:fixed;left:0;right:0;top:0;z-index:99;display:none;
-    background:var(--stop);color:#2a0603;padding:10px 14px;font-size:13px;
-    font-weight:600;line-height:1.4;word-break:break-word}
+  #banner{display:none;background:var(--stop);color:#2a0603;
+    padding:11px 14px;font-size:13px;font-weight:600;line-height:1.4;
+    word-break:break-word;cursor:pointer}
 
   .float{position:absolute;left:10px;right:10px;bottom:10px;display:flex;gap:6px;line-height:1}
   .float button{flex:1}
@@ -111,8 +111,6 @@
 </head>
 <body>
 
-<div id="banner"></div>
-
 <div id="stage">
   <video id="vid" playsinline muted autoplay></video>
   <canvas id="overlay"></canvas>
@@ -140,6 +138,8 @@
     <button id="btnClear">Reset shapes</button>
   </div>
 </div>
+
+<div id="banner"></div>
 
 <div id="hud">
 
@@ -671,20 +671,38 @@ function drawSpark(){
 }
 
 /* ---------- camera position: GPS fix and compass bearing ---------- */
-function fixLocation(){
+function getPos(opts){
   return new Promise(res=>{
-    if(!navigator.geolocation){ S.geoErr='no geolocation API'; return res(); }
-    navigator.geolocation.getCurrentPosition(p=>{
-      S.geo={lat:p.coords.latitude, lon:p.coords.longitude,
-             acc:p.coords.accuracy, alt:p.coords.altitude, t:p.timestamp};
-      S.geoErr=null; res();
-    }, e=>{
-      S.geoErr = e.code===1 ? 'permission denied'
-               : e.code===2 ? 'position unavailable'
-               : e.code===3 ? 'timed out' : (e.message||'failed');
-      res();
-    }, {enableHighAccuracy:true, timeout:20000, maximumAge:0});
+    navigator.geolocation.getCurrentPosition(
+      p=>res({ok:true, c:p.coords, t:p.timestamp}),
+      e=>res({ok:false, code:e.code}), opts);
   });
+}
+function setGeo(c,t,coarse){
+  S.geo={lat:c.latitude, lon:c.longitude, acc:c.accuracy,
+         alt:c.altitude, t:t||Date.now(), coarse:!!coarse};
+  S.geoErr=null;
+}
+/* Coarse network fix first, because it returns in a second or two and settles
+   the question of whether location works at all while the count is still young.
+   The precise fix follows, and the session-long watch keeps refining after that. */
+async function fixLocation(){
+  if(!navigator.geolocation){ S.geoErr='no geolocation API'; return; }
+  let r=await getPos({enableHighAccuracy:false, timeout:8000, maximumAge:60000});
+  if(r.ok) setGeo(r.c,r.t,true);
+  else if(r.code===1){ S.geoErr='permission denied'; return; }   // no point trying again
+  const p=await getPos({enableHighAccuracy:true, timeout:60000, maximumAge:0});
+  if(p.ok){ setGeo(p.c,p.t,false); return; }
+  if(S.geo) return;                                             // coarse fix still stands
+  S.geoErr = p.code===2 ? 'position unavailable'
+           : p.code===3 ? 'timed out' : 'failed';
+}
+/* A fix arriving late still belongs to this session: the phone has not moved. */
+function backfillGeo(){
+  if(!S.geo) return;
+  for(const k of S.snaps) if(k.lat==null){ k.lat=S.geo.lat; k.lon=S.geo.lon; k.acc=S.geo.acc; }
+  for(const e of S.events) if(e.lat==null){ e.lat=S.geo.lat; e.lon=S.geo.lon; }
+  if(!S.snapGeo) S.snapGeo={lat:S.geo.lat, lon:S.geo.lon};
 }
 async function fixHeading(){
   try{
@@ -826,27 +844,40 @@ function startCount(){
   S.geo=null; S.geoErr=null; banner(null);
   $('geo').textContent='Locating…';
   fixHeading();
-  fixLocation().then(()=>{
-    if(S.geo){
-      say('Counting at '+S.geo.lat.toFixed(5)+', '+S.geo.lon.toFixed(5)+
-          ' (±'+Math.round(S.geo.acc)+' m). Keep the phone still.');
-    }else{
-      say('Counting, but there is no GPS fix: '+(S.geoErr||'unavailable')+
-          '. The count is unaffected; coordinate columns will be blank. '+
-          (S.geoErr==='permission denied'
-            ? 'Allow location under Settings → Safari → Location, then restart the count.'
-            : 'Move into clearer sky and restart the count if you need coordinates.'), true);
-      banner('No GPS fix: '+(S.geoErr||'unavailable')+'. Counting continues; coordinates will be blank.');
-    }
-    if(cfg.snapOn) snapshot('session_start');
-  });
-  if(navigator.geolocation && !S.geoWatch){
+
+  // the watch runs for the whole session and can supply a fix after a timeout
+  if(navigator.geolocation && S.geoWatch==null){
     S.geoWatch=navigator.geolocation.watchPosition(
-      p=>{ S.geo={lat:p.coords.latitude, lon:p.coords.longitude,
-                  acc:p.coords.accuracy, alt:p.coords.altitude, t:p.timestamp};
-           S.geoErr=null; },
-      ()=>{}, {enableHighAccuracy:true, maximumAge:5000, timeout:20000});
+      p=>{
+        const late=!S.geo;
+        setGeo(p.coords, p.timestamp, false);
+        backfillGeo();
+        if(late){ banner(null);
+          say('GPS fix acquired: '+S.geo.lat.toFixed(5)+', '+S.geo.lon.toFixed(5)+
+              ' (±'+Math.round(S.geo.acc)+' m). Earlier rows have been filled in.'); }
+      },
+      ()=>{}, {enableHighAccuracy:true, maximumAge:5000, timeout:30000});
   }
+  if(cfg.snapOn) snapshot('session_start');   // baseline photo need not wait on GPS
+
+  fixLocation().then(()=>{
+    backfillGeo();
+    if(S.geo){
+      say('Counting at '+S.geo.lat.toFixed(5)+', '+S.geo.lon.toFixed(5)+' (±'+
+          Math.round(S.geo.acc)+' m'+(S.geo.coarse?', network fix':'')+'). Keep the phone still.');
+    }else{
+      // only interrupt if the count has barely begun; later failures stay quiet
+      const early = (Date.now()-S.t0) < 20000;
+      if(S.geoErr==='permission denied'){
+        say('Counting, but location is blocked. Allow it under Settings → Safari → Location, then restart.',true);
+        if(early) banner('Location permission denied. Counting continues without coordinates.');
+      }else{
+        say('Counting. No GPS fix yet ('+(S.geoErr||'unavailable')+') — still trying in the background, '+
+            'and any fix that arrives will be applied to rows already counted.',true);
+        if(early) banner('No GPS fix yet ('+(S.geoErr||'unavailable')+'). Still trying; counting is unaffected.');
+      }
+    }
+  });
   clearInterval(S.viewTimer);
   if(cfg.snapOn) S.viewTimer=setInterval(watchView, 2500);
 }
