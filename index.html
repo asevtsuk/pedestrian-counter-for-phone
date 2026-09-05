@@ -26,8 +26,19 @@
     font-variant-numeric:tabular-nums;overscroll-behavior:none}
   body{padding-bottom:env(safe-area-inset-bottom)}
 
-  #stage{position:relative;width:100%;min-height:58vh;background:#000;line-height:0}
-  #vid{width:100%;height:auto;min-height:58vh;display:block;object-fit:cover;background:#000}
+  #stage{position:relative;width:100%;min-height:58vh;background:#000;line-height:0;overflow:hidden}
+  #vid{width:100%;height:auto;min-height:58vh;display:block;object-fit:cover;background:#000;
+    transform-origin:center center;will-change:transform}
+
+  .tl{position:absolute;left:10px;top:10px;z-index:6;display:flex;gap:8px;align-items:center;line-height:1}
+  .tr{position:absolute;right:10px;top:10px;z-index:6;display:flex;gap:4px;align-items:center;line-height:1}
+  .tl #btnRun{padding:11px 22px;font-size:15px}
+  #miniClock{font-size:15px;font-weight:700;color:#fff;
+    background:rgba(14,20,24,.72);border-radius:8px;padding:8px 10px}
+  .mini{padding:8px 0;width:38px;text-align:center;font-size:17px;font-weight:700;
+    background:rgba(14,20,24,.72)}
+  #zVal{font-size:12px;font-weight:700;color:#fff;min-width:34px;text-align:center;
+    background:rgba(14,20,24,.72);border-radius:8px;padding:9px 4px}
   #overlay{position:absolute;left:0;top:0;width:100%;height:100%;touch-action:none}
 
   #startCard{position:absolute;inset:0;display:flex;flex-direction:column;
@@ -112,11 +123,21 @@
     <div id="startMsg"></div>
   </div>
 
+  <div class="tl" id="topbar" hidden>
+    <button id="btnRun" class="go" disabled>Start</button>
+    <span id="miniClock">15:00</span>
+  </div>
+
+  <div class="tr" id="zoombar" hidden>
+    <button id="zOut" class="mini">−</button>
+    <span id="zVal">1.0×</span>
+    <button id="zIn" class="mini">+</button>
+  </div>
+
   <div class="float" id="tools" hidden>
     <button id="btnGate">Gate</button>
     <button id="btnZone">Zone</button>
-    <button id="btnClear">Clear</button>
-    <button id="btnFlip">Flip</button>
+    <button id="btnClear">Reset shapes</button>
   </div>
 </div>
 
@@ -132,8 +153,8 @@
   </div>
 
   <div class="counts">
-    <div class="cell a"><div class="n" id="cA">0</div><div class="k" id="kA">Gate →</div></div>
-    <div class="cell b"><div class="n" id="cB">0</div><div class="k" id="kB">Gate ←</div></div>
+    <div class="cell a"><div class="n" id="cA">0</div><div class="k" id="kA">Gate L→R</div></div>
+    <div class="cell b"><div class="n" id="cB">0</div><div class="k" id="kB">Gate R→L</div></div>
     <div class="cell z"><div class="n" id="cZ">0</div><div class="k">Zone entries</div></div>
   </div>
 
@@ -145,11 +166,8 @@
   <canvas id="spark" width="600" height="92"></canvas>
 
   <div class="row">
-    <button id="btnRun" class="go" disabled>Start count</button>
-  </div>
-  <div class="row">
     <button id="btnGeo">Fix location</button>
-    <button id="btnReset">Reset</button>
+    <button id="btnReset">Reset counts</button>
   </div>
   <div class="row">
     <button id="btnCsv" disabled>Download CSV</button>
@@ -266,6 +284,7 @@ async function startCamera(){
     vid.setAttribute('playsinline','');
     try{ await vid.play(); }catch(e){ /* autoplay guard; the stream still shows */ }
     $('startCard').hidden=true; $('tools').hidden=false;
+    $('topbar').hidden=false; $('zoombar').hidden=false;
     S.running=true;
     fit(); detectLoop();
     say(S.model ? 'Camera on. Draw a gate or a zone.' : 'Camera on. Still loading the model…');
@@ -287,11 +306,11 @@ document.getElementById('btnStart').addEventListener('click', startCamera);
 /* ---------- state ---------- */
 const S = {
   model:null, running:false, counting:false,
-  gate:null,                 // {a:{x,y}, b:{x,y}} normalised
-  zone:[],                   // [{x,y}] normalised
+  gate:{a:{x:0.5,y:0.02}, b:{x:0.5,y:0.98}},   // vertical, down the middle, editable
+  zone:[],
   zoneClosed:false,
-  mode:'none',               // 'gate' | 'zone' | 'none'
-  flip:false,                // swap which gate direction is "→"
+  mode:'none',
+  zoom:1,
   tracks:[], nextId:1,
   cA:0, cB:0, cZ:0, occ:0,
   events:[], bins:[],
@@ -389,12 +408,16 @@ function tally(){
     const moved=Math.hypot(f.x-p.x, f.y-p.y);
 
     if(S.gate && S.gate.b && moved>1e-4 && segHit(p,f,S.gate.a,S.gate.b)){
-      const d={x:S.gate.b.x-S.gate.a.x, y:S.gate.b.y-S.gate.a.y};
-      const m={x:f.x-p.x, y:f.y-p.y};
-      let dir = (d.x*m.y - d.y*m.x) > 0 ? 'A' : 'B';
-      if(S.flip) dir = dir==='A' ? 'B' : 'A';
+      // direction is taken from the walker, not the gate: which way across the screen
+      const mx=f.x-p.x;
+      let dir;
+      if(Math.abs(mx)>1e-6){ dir = mx>0 ? 'A' : 'B'; }
+      else {                                    // purely vertical: fall back to the gate normal
+        const d={x:S.gate.b.x-S.gate.a.x, y:S.gate.b.y-S.gate.a.y};
+        dir = (d.x*(f.y-p.y) - d.y*mx) > 0 ? 'A' : 'B';
+      }
       if(dir==='A'){S.cA++;} else {S.cB++;}
-      logEvent(now,'gate',t.id,dir==='A'?'→':'←',f);
+      logEvent(now,'gate',t.id,dir==='A'?'L2R':'R2L',f);
       bin(now);
     }
     if(S.zoneClosed && S.zone.length>2){
@@ -442,13 +465,19 @@ async function loadYolo(src){
   throw last;
 }
 
+function cropRect(){
+  const W=vid.videoWidth, H=vid.videoHeight, z=S.zoom;
+  const sw=W/z, sh=H/z;
+  return {sx:(W-sw)/2, sy:(H-sh)/2, sw, sh};
+}
+
 function letterbox(){
-  const W=vid.videoWidth, H=vid.videoHeight;
-  const s=Math.min(YIN/W, YIN/H);
-  const nw=Math.round(W*s), nh=Math.round(H*s);
+  const c=cropRect();
+  const s=Math.min(YIN/c.sw, YIN/c.sh);
+  const nw=Math.round(c.sw*s), nh=Math.round(c.sh*s);
   const dx=(YIN-nw)>>1, dy=(YIN-nh)>>1;
   lctx.fillStyle='#727272'; lctx.fillRect(0,0,YIN,YIN);
-  lctx.drawImage(vid,0,0,W,H,dx,dy,nw,nh);
+  lctx.drawImage(vid, c.sx,c.sy,c.sw,c.sh, dx,dy,nw,nh);
   const px=lctx.getImageData(0,0,YIN,YIN).data;
   if(!inputBuf) inputBuf=new Float32Array(3*YIN*YIN);
   const plane=YIN*YIN;
@@ -457,7 +486,7 @@ function letterbox(){
     inputBuf[i+plane]   = px[p+1]/255;     // G
     inputBuf[i+2*plane] = px[p+2]/255;     // B
   }
-  return {s,dx,dy,W,H};
+  return {s,dx,dy,W:c.sw,H:c.sh};          // normalise against the visible crop
 }
 
 function nms(b,thr){
@@ -494,9 +523,10 @@ async function detectYolo(){
 }
 
 async function detectSsd(){
-  const w=cfg.size, h=Math.round(w*vid.videoHeight/vid.videoWidth);
+  const c=cropRect();
+  const w=cfg.size, h=Math.round(w*c.sh/c.sw);
   if(buf.width!==w||buf.height!==h){buf.width=w;buf.height=h;}
-  bctx.drawImage(vid,0,0,w,h);
+  bctx.drawImage(vid, c.sx,c.sy,c.sw,c.sh, 0,0,w,h);
   const raw=await S.model.detect(buf, 25, cfg.conf);
   return raw.filter(d=>d.class==='person')
             .map(d=>({x:d.bbox[0]/w, y:d.bbox[1]/h, w:d.bbox[2]/w, h:d.bbox[3]/h}));
@@ -570,18 +600,6 @@ function draw(){
     octx.beginPath(); octx.moveTo(X(a.x),Y(a.y)); octx.lineTo(X(b.x),Y(b.y)); octx.stroke();
     octx.fillStyle='#35D6C0';
     [a,b].forEach(p=>{octx.beginPath();octx.arc(X(p.x),Y(p.y),7,0,7);octx.fill();});
-    // arrow showing which side is "→"
-    const mx=(X(a.x)+X(b.x))/2, my=(Y(a.y)+Y(b.y))/2;
-    let nx=-(Y(b.y)-Y(a.y)), ny=(X(b.x)-X(a.x));
-    const L=Math.hypot(nx,ny)||1; nx/=L; ny/=L;
-    if(S.flip){nx=-nx;ny=-ny;}
-    octx.strokeStyle='#6FB6FF'; octx.lineWidth=3;
-    octx.beginPath(); octx.moveTo(mx,my); octx.lineTo(mx+nx*26,my+ny*26); octx.stroke();
-    octx.beginPath();
-    octx.moveTo(mx+nx*32,my+ny*32);
-    octx.lineTo(mx+nx*20-ny*7, my+ny*20+nx*7);
-    octx.lineTo(mx+nx*20+ny*7, my+ny*20-nx*7);
-    octx.fillStyle='#6FB6FF'; octx.fill();
   }
   requestAnimationFrame(draw);
 }
@@ -596,10 +614,10 @@ function tickUI(){
     S.elapsed=(Date.now()-S.t0)/1000;
     if(S.periodMin>0){
       const left=S.periodMin*60-S.elapsed;
-      $('clock').textContent=mmss(left);
+      $('clock').textContent=mmss(left); $('miniClock').textContent=mmss(left);
       if(left<=0){ stopCount('Period complete.'); }
     } else {
-      $('clock').textContent=mmss(S.elapsed);
+      $('clock').textContent=mmss(S.elapsed); $('miniClock').textContent=mmss(S.elapsed);
     }
   }
   $('cA').textContent=S.cA; $('cB').textContent=S.cB; $('cZ').textContent=S.cZ;
@@ -690,7 +708,7 @@ function startCount(){
   S.periodMin=+$('selPeriod').value;
   S.binWidth=+$('selBin').value;
   S.t0=Date.now(); S.counting=true;
-  $('btnRun').textContent='Stop count'; $('btnRun').className='stop';
+  $('btnRun').textContent='Stop'; $('btnRun').className='stop';
   $('phase').textContent='Counting';
   $('btnCsv').disabled=false; $('btnCopy').disabled=false;
   say('Counting. Keep the phone still — any camera movement will register as pedestrian movement.');
@@ -699,9 +717,9 @@ function startCount(){
 }
 function stopCount(why){
   S.counting=false; S.elapsed=(Date.now()-S.t0)/1000;
-  $('btnRun').textContent='Start count'; $('btnRun').className='go';
+  $('btnRun').textContent='Start'; $('btnRun').className='go';
   $('phase').textContent='Stopped';
-  $('clock').textContent=mmss(S.elapsed);
+  $('clock').textContent=mmss(S.elapsed); $('miniClock').textContent=mmss(S.elapsed);
   say((why||'Stopped.')+' '+summaryLine());
   if(S.wakeLock){S.wakeLock.release().catch(()=>{}); S.wakeLock=null;}
 }
@@ -788,7 +806,7 @@ ov.addEventListener('pointerdown',e=>{
     if(!S.gate || S.gate.b) S.gate={a:p,b:null};
     else { S.gate.b=p; }
     if(S.gate && !S.gate.b) drag={kind:'newGate'};
-    else { setMode('none'); say('Gate set. Drag the endpoints to adjust, or tap Flip to swap directions.'); }
+    else { setMode('none'); say('Gate set. Drag either endpoint to adjust it.'); }
   } else if(S.mode==='zone'){
     if(S.zoneClosed){ S.zone=[]; S.zoneClosed=false; }
     S.zone.push(p);
@@ -829,15 +847,21 @@ $('btnZone').onclick=()=>{
   if(S.mode==='zone'){ S.zone=[]; S.zoneClosed=false;
     say('Tap three or more corners, then tap Close zone.'); }
 };
-$('btnClear').onclick=()=>{ S.gate=null; S.zone=[]; S.zoneClosed=false;
-  setMode('none'); ready(); say('Gate and zone cleared.'); };
-$('btnFlip').onclick=()=>{ S.flip=!S.flip;
-  $('kA').textContent = S.flip?'Gate ←':'Gate →';
-  $('kB').textContent = S.flip?'Gate →':'Gate ←'; };
+$('btnClear').onclick=()=>{ S.gate={a:{x:0.5,y:0.02}, b:{x:0.5,y:0.98}};
+  S.zone=[]; S.zoneClosed=false; setMode('none'); ready();
+  say('Back to the default centre gate.'); };
+
+function setZoom(z){
+  S.zoom=Math.min(4,Math.max(1,+z.toFixed(2)));
+  vid.style.transform='scale('+S.zoom+')';
+  $('zVal').textContent=S.zoom.toFixed(1)+'×';
+}
+$('zIn').onclick=()=>setZoom(S.zoom+ (S.zoom<2?0.25:0.5));
+$('zOut').onclick=()=>setZoom(S.zoom- (S.zoom<=2?0.25:0.5));
 $('btnRun').onclick=()=> S.counting ? stopCount('Stopped early.') : startCount();
 $('btnReset').onclick=()=>{ S.counting=false; resetCounts();
   $('clock').textContent = mmss((+$('selPeriod').value)*60);
-  $('phase').textContent='Ready'; $('btnRun').textContent='Start count';
+  $('phase').textContent='Ready'; $('btnRun').textContent='Start';
   $('btnRun').className='go'; say('Counts cleared.'); };
 $('btnGeo').onclick=async()=>{
   say('Getting a GPS fix…');
@@ -852,7 +876,8 @@ $('btnCopy').onclick=()=>{
     .then(()=>say('Summary copied.')).catch(()=>say('Could not copy.',true));
 };
 $('selPeriod').onchange=e=>{ S.periodMin=+e.target.value;
-  if(!S.counting) $('clock').textContent = S.periodMin?mmss(S.periodMin*60):'00:00'; };
+  if(!S.counting){ const t=S.periodMin?mmss(S.periodMin*60):'00:00';
+    $('clock').textContent=t; $('miniClock').textContent=t; } };
 $('selBin').onchange=e=>{ S.binWidth=+e.target.value; };
 
 const bindRange=(id,vid2,key,fmt)=>{
